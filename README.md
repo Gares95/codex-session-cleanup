@@ -9,10 +9,11 @@ The helper decides which logical sessions match a retention policy. The
 installed `codex` command performs every archive or deletion.
 
 > [!IMPORTANT]
-> **Compatibility status (last verified 2026-08-28):** This repository remains
-> experimental and is not ready for operational cleanup. In Codex CLI 0.150.1,
-> both stable and experimental generated app-server schemas omit `isPinned`
-> from `Thread`, `ThreadListParams`, and `ThreadMetadataUpdateParams`. An
+> **Compatibility status (last verified 2026-10-01):** This repository remains
+> experimental and is not ready for operational cleanup. In Codex CLI 0.160.0,
+> both stable and experimental generated app-server schemas still omit
+> `isPinned` from `Thread`, `ThreadListParams`, and
+> `ThreadMetadataUpdateParams`. An
 > isolated `thread/metadata/update` probe also rejected `isPinned`. This
 > conflicts with the [official app-server contract][app-server-docs], which
 > documents the thread field, list filter, and metadata update parameter. The
