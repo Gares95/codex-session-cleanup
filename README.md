@@ -1,152 +1,288 @@
 # codex-session-cleanup
 
-`codex-session-cleanup` is a small Codex skill for retaining recent local
-session history and safely archiving or deleting older sessions. It exists to
-make routine cleanup predictable without turning Codex's session storage into
-a user-managed filesystem.
+`codex-session-cleanup` is a small Codex skill for previewing retention rules and
+safely archiving or deleting old local session history. The helper selects
+logical session UUIDs; the installed `codex` command remains responsible for
+rollout files, metadata, and descendant cascades.
 
-The helper decides which logical sessions match a retention policy. The
-installed `codex` command performs every archive or deletion.
+The helper never edits Codex files, databases, indexes, or other internal state
+directly. Python 3.10+ and the standard library are sufficient.
 
 > [!IMPORTANT]
 > **Compatibility status (last verified 2026-10-25):** Codex CLI 0.164.0
-> replaced `Thread.isPinned` with persisted thread sections. The installed
-> schema and an isolated runtime probe confirmed `Thread.section`, paginated
-> `threadSection/list`, and the built-in `Pinned` section. This helper now
-> discovers that section dynamically and uses its logical ID to protect pinned
-> roots and descendants. It still validates the installed schema and runtime
-> response before considering any session for cleanup.
+> exposes pinning through `Thread.section` and paginated
+> `threadSection/list`. The helper discovers the unique built-in `Pinned`
+> section and validates the installed generated schema on every invocation.
+> Compatibility is determined from the installed CLI because public app-server
+> [documentation][app-server-docs] may describe a different protocol revision.
 
-## Supported policies
+## Retention semantics
 
-- Select sessions last used before an age cutoff: `--older-than 48h` or
-  `--older-than 7d`.
-- Preserve the N most recently used sessions: `--keep-latest 5`.
-- Combine both rules with intersection semantics: only sessions older than the
-  cutoff and outside the latest N become candidates.
-- Restrict matching to the exact invoking cwd with `--project current`, the
-  default.
-- Consider sessions across projects only with `--project all`.
-- Archive by default, or permanently delete only with an explicit
-  `--action delete`.
+Supported selectors are deliberately narrow:
 
-At least one retention selector is required. Counts must be positive whole
-numbers, and durations accept only positive whole hours or days.
+- `--older-than 48h` or `--older-than 7d` selects sessions whose `recencyAt`
+  is strictly before the absolute cutoff.
+- `--keep-latest 5` protects the five most recently used sessions.
+- Combining selectors uses intersection semantics: a session must be older
+  than the cutoff **and** outside the latest N to be eligible.
+- `--project current` is the default and requires an exact match with the cwd
+  from which the helper is invoked.
+- `--project all` explicitly considers all discoverable projects.
+- `--action archive` is the default. Permanent deletion must be explicit.
+
+The latest-N ranking universe is all safely parsed ordinary interactive roots
+plus every safely parsed spawned descendant discovered beneath those roots
+within the selected project scope. Descendants therefore consume latest-N
+positions. Pinned, loaded, active, and otherwise protected sessions also remain
+in this ranking universe, so `--keep-latest N` preserves at least N sessions,
+not N additional unprotected sessions.
+
+Codex archive/delete operations cascade from a selected root. A root is
+blocked if **any** affected descendant:
+
+- is too recent or falls within latest N;
+- is pinned, loaded, active, ephemeral, errored, or malformed;
+- crosses the exact cwd boundary for `--project current`; or
+- has missing, cyclic, conflicting, or otherwise ambiguous ancestry.
+
+The helper never detaches or independently mutates descendants.
+
+## Discovery scope
+
+Root discovery requests ordinary saved interactive sources (`cli` and
+`vscode`) and excludes child threads from independent selection. Once a root
+is considered, descendant discovery uses every source kind advertised by the
+installed schema so subagents and other spawned histories are included in the
+cascade check.
+
+Discovery uses `thread/list` with `useStateDbOnly: true`. Consequently:
+
+- only sessions indexed by the supported Codex state database are covered;
+- historical or otherwise unindexed rollout files may be omitted;
+- the helper does not scan rollout files or ask Codex to repair metadata;
+- archive policies consider non-archived roots and descendants only;
+- delete policies consider both active and archived roots and descendants;
+- exact-cwd root filtering happens in the app-server for `--project current`;
+- out-of-scope roots are not enumerated, while any discovered out-of-scope
+  descendant blocks its root.
+
+This utility does not claim to cover every file that may exist in Codex
+history.
 
 ## Safety model
 
-Every normal invocation is a preview. It discovers ordinary saved interactive
-sessions through the installed [Codex app-server][app-server-docs] and uses
-`recencyAt` as “last used.” It never substitutes rollout creation time or
-filesystem timestamps.
+Every policy invocation is a preview unless an explicit apply mode is used.
+The helper requires `recencyAt`, exact cwd, section-based pin state, runtime
+status, loaded-thread state, source/ephemeral metadata, ancestry filtering,
+and pagination. Missing or malformed safety metadata stops or excludes the
+affected operation rather than being guessed.
 
-Before selecting roots, the helper identifies Codex's unique built-in `Pinned`
-thread section, then protects pinned, ephemeral, active, errored, or malformed
-sessions. It enumerates spawned descendants, blocks roots with a pinned or
-active descendant, and prevents exact-project cleanup from cascading outside
-the selected cwd. Apply mode performs a second discovery immediately before
-mutation and aborts on stale candidates or safety metadata.
+Human previews include sanitized titles, last-used time and age, project path,
+archived state, root/descendant relationships, affected descendants, and
+protection reasons. `--details` prints full UUIDs and expanded state. `--json`
+emits the same versioned plan structure used by saved manifests.
 
-The helper generates the installed app-server schema at runtime and verifies
-the required fields. If the installed Codex does not expose section-based pin
-state, `recencyAt`, runtime status, exact cwd, or descendant filtering, cleanup
-fails closed. A missing, duplicated, or malformed `Pinned` section also stops
-cleanup. There is no unsafe compatibility fallback.
+Before mutation, cooperating cleanup processes take a per-Codex-home advisory
+lock. The helper re-discovers the remaining expected candidate set immediately
+before each root command and stops later mutations after a changed state or a
+Codex command failure. Partial success is reported explicitly.
 
-The script does not remove or move rollout files and does not edit Codex
-databases, indexes, configuration, authentication, logs, skills, plugins,
-memories, or other state. It invokes exact UUID argument arrays with:
+The helper starts a standalone app-server for discovery. Its loaded-thread list
+cannot prove that an independent Codex/app-server process has not loaded a
+thread after discovery. Close other Codex clients before applying cleanup. The
+CLI's own ownership/refusal behavior remains an important final safeguard.
 
-```text
-codex archive <UUID>
-codex delete <UUID> --force
-```
+The installed 0.164.0 archive/delete APIs accept a thread ID but expose no
+conditional state token or atomic compare-and-mutate operation. A session can
+still change in the small interval between the last read and the Codex command.
+Codex ownership/refusal checks remain the final authority; the helper never
+retries with a less safe operation.
 
-Codex remains responsible for session files, metadata, descendant cascades,
-and ownership protections.
+## Permanent-delete manifests
+
+Direct permanent deletion with `--action delete --apply` is disabled. Use a
+reviewed plan:
+
+1. Preview the exact roots and descendants.
+2. Save the preview with `--save-plan`.
+3. Review the text output and private JSON file.
+4. Apply that file with `--apply-plan`.
+
+The manifest records its format version, creation time, absolute cutoff,
+policy, exact cwd, Codex home and CLI version, full candidate/descendant UUIDs,
+and all safety-critical metadata. It is created with mode `0600` on POSIX. Its
+digest detects accidental editing, but safety does not rely on the digest.
+Apply also regenerates the plan from Codex and compares the full effective
+candidate set.
+
+Changed membership, a new descendant, recency changes, new pin/load/activity,
+project changes, or malformed metadata makes the plan stale. A stale,
+`applying`, partially consumed, or consumed plan cannot be replayed; generate
+and review a new one. Applying from a different Codex home—or, for current
+project plans, a different cwd—is also refused. A Codex update requires a new
+preview. Put manifests under an ignored private directory such as `.local/`
+because they contain local paths, titles, and full session UUIDs. Plan paths
+inside the resolved Codex home are refused;
+the helper performs no direct writes there.
+
+Archive remains reversible and may use `--apply` without a saved manifest. It
+still performs locking and per-root validation, but it is not persistently
+bound to a preview from an earlier command. The skill should show a separate
+archive preview before applying it.
 
 ## Installation
 
-Clone or copy the repository directly into the documented user skill location:
+Clone or copy the repository into the documented user skill location:
 
 ```bash
 git clone <repository-url> "$HOME/.agents/skills/codex-session-cleanup"
 ```
 
-Restart Codex if the skill does not appear automatically. Do not replace
-`<repository-url>` until the repository has been published.
-
-The distributable skill needs only:
+The distributable skill requires only:
 
 ```text
 SKILL.md
 scripts/cleanup_sessions.py
 ```
 
-## Usage
+Run the helper by absolute path while remaining in the project whose sessions
+you want to target. Running it from the skill directory would make that
+directory the exact current-project scope.
 
-Ask Codex naturally after installing the skill:
+## Examples
 
-```text
-Clean Codex sessions older than 48 hours.
-Keep my 5 most recently used Codex sessions and archive the rest.
-Archive sessions older than 7 days for the current project.
-Show me what would be removed if I keep only sessions from the last 3 days.
-Keep my latest 10 sessions across all projects and archive older ones.
-Delete sessions older than 30 days permanently.
-```
+Replace `<skill-directory>` with the installed skill directory.
 
-The skill translates the request to the narrow helper interface. You can also
-run the helper directly from the installed skill directory:
+### 1. Current-project archive preview
 
 ```bash
-python3 scripts/cleanup_sessions.py --older-than 48h
-python3 scripts/cleanup_sessions.py --keep-latest 5 --project all
-python3 scripts/cleanup_sessions.py --older-than 7d --keep-latest 5
-python3 scripts/cleanup_sessions.py --older-than 30d --action delete
+python3 <skill-directory>/scripts/cleanup_sessions.py \
+  --older-than 7d --project current --action archive
 ```
 
-These commands are read-only previews. A preview ends with `No changes made.`
-Use the same policy with `--apply` only after reviewing it:
+### 2. Current-project permanent-delete preview
 
 ```bash
-python3 scripts/cleanup_sessions.py \
-  --older-than 7d --keep-latest 5 --project current --action archive --apply
+python3 <skill-directory>/scripts/cleanup_sessions.py \
+  --older-than 30d --project current --action delete
 ```
 
-Archive is reversible through Codex. Delete is irreversible and requires both
-`--action delete` and `--apply`; the skill uses delete only when permanent
-deletion was explicitly requested.
+This never deletes anything and explains that a saved plan is required.
 
-## Requirements and compatibility
+### 3. Save a deletion manifest
 
-- Python 3.10 or newer, using only the standard library.
+```bash
+mkdir -p .local
+python3 <skill-directory>/scripts/cleanup_sessions.py \
+  --older-than 30d --project current --action delete \
+  --details --save-plan .local/cleanup-plan.json
+```
+
+### 4. Apply the reviewed manifest
+
+```bash
+python3 <skill-directory>/scripts/cleanup_sessions.py \
+  --apply-plan .local/cleanup-plan.json
+```
+
+No policy flags are accepted with `--apply-plan`; the reviewed manifest is the
+policy and candidate authority.
+
+### 5. Keep the most recent N sessions
+
+```bash
+python3 <skill-directory>/scripts/cleanup_sessions.py \
+  --keep-latest 5 --project current
+```
+
+### 6. Combine age and latest-count retention
+
+```bash
+python3 <skill-directory>/scripts/cleanup_sessions.py \
+  --older-than 7d --keep-latest 5 --project current
+```
+
+### 7. Consider all projects
+
+```bash
+python3 <skill-directory>/scripts/cleanup_sessions.py \
+  --older-than 30d --project all --action archive
+```
+
+### 8. Review full UUIDs and all affected descendants
+
+```bash
+python3 <skill-directory>/scripts/cleanup_sessions.py \
+  --older-than 30d --project current --action delete --details
+```
+
+Compact previews also list every affected descendant; `--details` expands IDs
+and runtime metadata.
+
+### 9. Obtain machine-readable JSON
+
+```bash
+python3 <skill-directory>/scripts/cleanup_sessions.py \
+  --older-than 30d --project current --action delete --json
+```
+
+The JSON `format` is `codex-session-cleanup-plan`, currently version `1`.
+Text output, JSON output, and saved manifests are rendered from the same plan
+object. The stable top-level JSON fields are:
+
+- `format`, `version`, `planId`, `state`, and `createdAt`;
+- `codexHome`, `codexVersion`, `policy`, `scope`, and `summary`;
+- `candidates`, with each selected root and all cascading descendants;
+- `protected` and `malformed`, with reasons and blocking descendants; and
+- `changesMade`, `application`, and `integrity`.
+
+Session records contain identifying metadata and safety state, not conversation
+contents. Treat JSON output as private for the same reason as saved manifests.
+A future incompatible structure will increment `version` and old manifests
+will fail closed.
+
+### Archive after review
+
+```bash
+python3 <skill-directory>/scripts/cleanup_sessions.py \
+  --older-than 7d --project current --action archive --apply
+```
+
+### Read-only compatibility check
+
+```bash
+python3 <skill-directory>/scripts/cleanup_sessions.py --check-compatibility
+```
+
+The check validates the generated schema, mutation command shapes, Codex home,
+built-in pinned section, and loaded-thread API without mutating sessions.
+
+Operational errors return nonzero. In particular, invalid/replayed manifests
+return `2`, stale-plan refusals return `3`, and advisory-lock conflicts return
+`4`. A mutation failure or safety stop returns `1`.
+
+## Requirements
+
+- Python 3.10 or newer.
 - An installed `codex` executable on `PATH`, or a validated `codex`/`codex.js`
   entry point under `$CODEX_MANAGED_PACKAGE_ROOT/bin`.
-- A Codex app-server schema that exposes pagination, `recencyAt`, exact cwd,
-  `Thread.section`, `threadSection/list`, runtime state, source/ephemeral
-  metadata, and descendant filtering.
-- UUID-based `codex archive` and forced `codex delete` commands.
+- A compatible generated app-server schema.
+- UUID-based `codex archive` and `codex delete --force` commands.
 
-The helper inherits the runtime environment and trusts the app-server's
-initialized `codexHome`, verifying an explicit `CODEX_HOME` override when one
-is present. It does not assume that Codex state lives at a hard-coded path.
-
-Run a preview after installing or updating Codex to verify compatibility. A
-safety-contract error means no changes were made and the installed version is
-not suitable for this helper.
+The helper trusts the app-server's initialized `codexHome` and verifies an
+explicit `CODEX_HOME` override. It never assumes a hard-coded Codex home.
 
 ## Development
 
-Run the synthetic standard-library test suite without accessing real sessions:
+Run the standard-library suite, including the isolated fake Codex integration:
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-Validate the skill frontmatter with the `quick_validate.py` helper bundled with
-Codex's `skill-creator` skill when available. No package manager, dependency
-installation, database, daemon, or build step is required.
+Validate skill frontmatter with the `quick_validate.py` helper bundled with
+Codex's `skill-creator` skill. Tests use fictional UUIDs and temporary state;
+they never destructively test personal Codex sessions.
 
 ## License
 
