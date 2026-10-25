@@ -51,6 +51,10 @@ metadata, stop. Recommend updating or using a Codex version that exposes the
 required app-server fields. Do not inspect internal databases or fall back to
 rollout paths or filesystem timestamps.
 
+Treat membership in Codex's built-in `Pinned` thread section as pinned state.
+If the helper cannot identify exactly one such section or cannot interpret a
+thread's section metadata, preserve the safety stop.
+
 ## Apply deliberately
 
 Add `--apply` only when the user asked to perform the previewed action. Keep all

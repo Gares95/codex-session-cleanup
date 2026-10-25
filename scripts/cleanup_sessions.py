@@ -25,6 +25,7 @@ import uuid
 
 INTERACTIVE_SOURCES = ("cli", "vscode")
 SAFE_STATUSES = ("notLoaded", "idle")
+PINNED_SECTION_NAME = "Pinned"
 DURATION_RE = re.compile(r"([1-9][0-9]*)([hd])\Z")
 
 
@@ -106,6 +107,12 @@ class Plan:
 @dataclasses.dataclass(frozen=True)
 class SchemaCapabilities:
     all_source_kinds: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class ThreadSection:
+    id: str
+    name: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -202,7 +209,17 @@ def optional_uuid(value: Any, field: str) -> str | None:
     return None if value is None else canonical_uuid(value, field)
 
 
-def parse_thread(raw: Mapping[str, Any], *, archived: bool) -> Session:
+def parse_thread_section(raw: Mapping[str, Any]) -> ThreadSection:
+    section_id = canonical_uuid(raw.get("id"), "section id")
+    name = raw.get("name")
+    if not isinstance(name, str) or not name:
+        raise ValueError("section name is missing or empty")
+    return ThreadSection(section_id, name)
+
+
+def parse_thread(
+    raw: Mapping[str, Any], *, archived: bool, pinned_section_id: str
+) -> Session:
     """Validate a thread object without substituting missing safety metadata."""
     session_id = canonical_uuid(raw.get("id"))
     cwd = raw.get("cwd")
@@ -210,9 +227,21 @@ def parse_thread(raw: Mapping[str, Any], *, archived: bool) -> Session:
         raise ValueError("cwd is missing or is not absolute")
     cwd = normalize_invoking_cwd(cwd)
 
-    pinned = raw.get("isPinned")
-    if not isinstance(pinned, bool):
-        raise ValueError("isPinned is missing or is not boolean")
+    if "section" not in raw:
+        raise ValueError("section is missing")
+    section_value = raw["section"]
+    if section_value is None:
+        pinned = False
+    elif isinstance(section_value, Mapping):
+        section = parse_thread_section(section_value)
+        pinned_id = canonical_uuid(pinned_section_id, "pinned section id")
+        if (section.id == pinned_id) != (section.name == PINNED_SECTION_NAME):
+            raise ValueError(
+                "section metadata conflicts with the built-in Pinned section"
+            )
+        pinned = section.id == pinned_id
+    else:
+        raise ValueError("section is malformed")
     ephemeral = raw.get("ephemeral")
     if not isinstance(ephemeral, bool):
         raise ValueError("ephemeral is missing or is not boolean")
@@ -386,11 +415,13 @@ def validate_schema_contract(
     list_params: Mapping[str, Any],
     list_response: Mapping[str, Any],
     initialize_response: Mapping[str, Any],
+    section_list_params: Mapping[str, Any],
+    section_list_response: Mapping[str, Any],
 ) -> SchemaCapabilities:
     param_properties = list_params.get("properties", {})
     required_params = {
-        "ancestorThreadId", "archived", "cursor", "cwd", "sortKey",
-        "sortDirection", "sourceKinds", "useStateDbOnly",
+        "ancestorThreadId", "archived", "cursor", "cwd", "limit", "sectionId",
+        "sortKey", "sortDirection", "sourceKinds", "useStateDbOnly",
     }
     missing_params = sorted(required_params - set(param_properties))
 
@@ -398,20 +429,43 @@ def validate_schema_contract(
     thread_properties = definitions.get("Thread", {}).get("properties", {})
     required_thread = {
         "id", "name", "preview", "createdAt", "updatedAt", "recencyAt",
-        "cwd", "ephemeral", "isPinned", "sessionId", "parentThreadId",
+        "cwd", "ephemeral", "section", "sessionId", "parentThreadId",
         "source", "status",
     }
     missing_thread = sorted(required_thread - set(thread_properties))
-    if "codexHome" not in initialize_response.get("properties", {}):
-        missing_thread.append("InitializeResponse.codexHome")
+
+    response_properties = list_response.get("properties", {})
+    missing_response = sorted({"data", "nextCursor"} - set(response_properties))
+
+    section_param_properties = section_list_params.get("properties", {})
+    missing_section_params = sorted(
+        {"cursor", "limit"} - set(section_param_properties)
+    )
+    section_response_properties = section_list_response.get("properties", {})
+    missing_section_response = sorted(
+        {"data", "nextCursor"} - set(section_response_properties)
+    )
+    section_definitions = section_list_response.get("definitions", {})
+    section_properties = section_definitions.get("ThreadSection", {}).get(
+        "properties", {}
+    )
+    missing_section = sorted({"id", "name"} - set(section_properties))
 
     source_schema = list_params.get("definitions", {}).get("ThreadSourceKind", {})
     source_values = tuple(source_schema.get("enum", ()))
-    if not source_values:
+    if not source_values or not all(isinstance(item, str) for item in source_values):
         missing_params.append("ThreadSourceKind enum")
 
-    missing = [*(f"ThreadListParams.{item}" for item in missing_params),
-               *(f"Thread.{item}" for item in missing_thread)]
+    missing = [
+        *(f"ThreadListParams.{item}" for item in missing_params),
+        *(f"ThreadListResponse.{item}" for item in missing_response),
+        *(f"Thread.{item}" for item in missing_thread),
+        *(f"ThreadSectionListParams.{item}" for item in missing_section_params),
+        *(f"ThreadSectionListResponse.{item}" for item in missing_section_response),
+        *(f"ThreadSection.{item}" for item in missing_section),
+    ]
+    if "codexHome" not in initialize_response.get("properties", {}):
+        missing.append("InitializeResponse.codexHome")
     if missing:
         raise CompatibilityError(
             "installed Codex does not expose required cleanup safety metadata: "
@@ -441,7 +495,15 @@ def inspect_installed_schema(
         list_params = _load_schema_by_title(root, "ThreadListParams")
         list_response = _load_schema_by_title(root, "ThreadListResponse")
         initialize_response = _load_schema_by_title(root, "InitializeResponse")
-        return validate_schema_contract(list_params, list_response, initialize_response)
+        section_list_params = _load_schema_by_title(root, "ThreadSectionListParams")
+        section_list_response = _load_schema_by_title(root, "ThreadSectionListResponse")
+        return validate_schema_contract(
+            list_params,
+            list_response,
+            initialize_response,
+            section_list_params,
+            section_list_response,
+        )
 
 
 def inspect_mutation_commands(
@@ -485,7 +547,11 @@ class AppServerClient:
         result = self.request(
             "initialize",
             {
-                "clientInfo": {"name": "codex-session-cleanup", "version": "1"},
+                "clientInfo": {
+                    "name": "codex-session-cleanup",
+                    "title": "Codex Session Cleanup",
+                    "version": "1",
+                },
                 "capabilities": {"experimentalApi": True},
             },
         )
@@ -597,7 +663,64 @@ class SessionDiscovery:
             seen_cursors.add(next_cursor)
             cursor = next_cursor
 
-    def discover_roots(self, policy: Policy) -> tuple[list[Session], list[UnsafeRecord]]:
+    def _list_section_pages(self) -> list[Mapping[str, Any]]:
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        records: list[Mapping[str, Any]] = []
+        while True:
+            params: dict[str, Any] = {"limit": 100}
+            if cursor is not None:
+                params["cursor"] = cursor
+            result = self.client.request("threadSection/list", params)
+            data = result.get("data")
+            if not isinstance(data, list) or not all(
+                isinstance(item, Mapping) for item in data
+            ):
+                raise ProtocolError("threadSection/list returned malformed data")
+            records.extend(data)
+            next_cursor = result.get("nextCursor")
+            if next_cursor is None:
+                return records
+            if (
+                not isinstance(next_cursor, str)
+                or not next_cursor
+                or next_cursor in seen_cursors
+            ):
+                raise ProtocolError(
+                    "threadSection/list returned an invalid pagination cursor"
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+    def discover_pinned_section(self) -> ThreadSection:
+        sections: dict[str, ThreadSection] = {}
+        for raw in self._list_section_pages():
+            try:
+                section = parse_thread_section(raw)
+            except ValueError as exc:
+                raise ProtocolError(
+                    f"threadSection/list returned malformed data: {exc}"
+                ) from exc
+            if section.id in sections:
+                raise ProtocolError(
+                    "threadSection/list returned a duplicate section id"
+                )
+            sections[section.id] = section
+
+        pinned = [
+            section for section in sections.values()
+            if section.name == PINNED_SECTION_NAME
+        ]
+        if len(pinned) != 1:
+            raise CompatibilityError(
+                "installed Codex did not expose exactly one built-in Pinned "
+                "thread section"
+            )
+        return pinned[0]
+
+    def discover_roots(
+        self, policy: Policy, *, pinned_section_id: str
+    ) -> tuple[list[Session], list[UnsafeRecord]]:
         archived_scopes = (False, True) if policy.action == "delete" else (False,)
         sessions: list[Session] = []
         malformed: list[UnsafeRecord] = []
@@ -614,7 +737,11 @@ class SessionDiscovery:
             for raw in self._list_pages(params):
                 raw_id = raw.get("id") if isinstance(raw.get("id"), str) else None
                 try:
-                    item = parse_thread(raw, archived=archived)
+                    item = parse_thread(
+                        raw,
+                        archived=archived,
+                        pinned_section_id=pinned_section_id,
+                    )
                     if item.source_kind not in INTERACTIVE_SOURCES or item.parent_id is not None:
                         continue
                     sessions.append(item)
@@ -623,7 +750,7 @@ class SessionDiscovery:
         return sessions, malformed
 
     def discover_descendants(
-        self, root: Session, policy: Policy
+        self, root: Session, policy: Policy, *, pinned_section_id: str
     ) -> tuple[Sequence[Session], Sequence[UnsafeRecord]]:
         archived_scopes = (False, True) if policy.action == "delete" else (False,)
         descendants: dict[str, Session] = {}
@@ -640,7 +767,11 @@ class SessionDiscovery:
             for raw in self._list_pages(params):
                 raw_id = raw.get("id") if isinstance(raw.get("id"), str) else None
                 try:
-                    item = parse_thread(raw, archived=archived)
+                    item = parse_thread(
+                        raw,
+                        archived=archived,
+                        pinned_section_id=pinned_section_id,
+                    )
                     if item.id in descendants and descendants[item.id] != item:
                         raise ValueError("descendant appeared with conflicting metadata")
                     descendants[item.id] = item
@@ -652,13 +783,18 @@ class SessionDiscovery:
 def discover_plan(
     discovery: SessionDiscovery, policy: Policy, *, now: dt.datetime
 ) -> Plan:
-    sessions, malformed = discovery.discover_roots(policy)
+    pinned_section = discovery.discover_pinned_section()
+    sessions, malformed = discovery.discover_roots(
+        policy, pinned_section_id=pinned_section.id
+    )
     return build_plan(
         sessions,
         policy,
         now=now,
         malformed=malformed,
-        descendant_lookup=lambda root: discovery.discover_descendants(root, policy),
+        descendant_lookup=lambda root: discovery.discover_descendants(
+            root, policy, pinned_section_id=pinned_section.id
+        ),
     )
 
 
@@ -767,11 +903,26 @@ def render_mutation_report(report: MutationReport, action: str) -> str:
     return "\n".join(lines)
 
 
-def find_codex() -> str:
-    value = shutil.which("codex")
-    if value is None:
-        raise CompatibilityError("codex executable was not found on PATH")
-    return value
+def find_codex(*, environment: Mapping[str, str] | None = None) -> str:
+    environment = os.environ if environment is None else environment
+    value = shutil.which("codex", path=environment.get("PATH"))
+    if value is not None:
+        return value
+
+    package_root = environment.get("CODEX_MANAGED_PACKAGE_ROOT")
+    if package_root:
+        root = Path(package_root)
+        executable_names = ("codex.exe",) if os.name == "nt" else ("codex", "codex.js")
+        if root.is_absolute():
+            for executable_name in executable_names:
+                candidate = root / "bin" / executable_name
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    return str(candidate)
+
+    raise CompatibilityError(
+        "codex executable was not found on PATH or at "
+        "a supported $CODEX_MANAGED_PACKAGE_ROOT/bin entry point"
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

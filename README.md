@@ -9,16 +9,13 @@ The helper decides which logical sessions match a retention policy. The
 installed `codex` command performs every archive or deletion.
 
 > [!IMPORTANT]
-> **Compatibility status (last verified 2026-10-01):** This repository remains
-> experimental and is not ready for operational cleanup. In Codex CLI 0.160.0,
-> both stable and experimental generated app-server schemas still omit
-> `isPinned` from `Thread`, `ThreadListParams`, and
-> `ThreadMetadataUpdateParams`. An
-> isolated `thread/metadata/update` probe also rejected `isPinned`. This
-> conflicts with the [official app-server contract][app-server-docs], which
-> documents the thread field, list filter, and metadata update parameter. The
-> helper therefore continues to fail closed and make no changes. Use the skill
-> only after an installed Codex version exposes working pin metadata.
+> **Compatibility status (last verified 2026-10-25):** Codex CLI 0.164.0
+> replaced `Thread.isPinned` with persisted thread sections. The installed
+> schema and an isolated runtime probe confirmed `Thread.section`, paginated
+> `threadSection/list`, and the built-in `Pinned` section. This helper now
+> discovers that section dynamically and uses its logical ID to protect pinned
+> roots and descendants. It still validates the installed schema and runtime
+> response before considering any session for cleanup.
 
 ## Supported policies
 
@@ -39,19 +36,22 @@ numbers, and durations accept only positive whole hours or days.
 ## Safety model
 
 Every normal invocation is a preview. It discovers ordinary saved interactive
-sessions through the installed Codex app-server and uses `recencyAt` as “last
-used.” It never substitutes rollout creation time or filesystem timestamps.
+sessions through the installed [Codex app-server][app-server-docs] and uses
+`recencyAt` as “last used.” It never substitutes rollout creation time or
+filesystem timestamps.
 
-Before selecting roots, the helper protects pinned, ephemeral, active, errored,
-or malformed sessions. It enumerates spawned descendants, blocks roots with a
-pinned or active descendant, and prevents exact-project cleanup from cascading
-outside the selected cwd. Apply mode performs a second discovery immediately
-before mutation and aborts on stale candidates or safety metadata.
+Before selecting roots, the helper identifies Codex's unique built-in `Pinned`
+thread section, then protects pinned, ephemeral, active, errored, or malformed
+sessions. It enumerates spawned descendants, blocks roots with a pinned or
+active descendant, and prevents exact-project cleanup from cascading outside
+the selected cwd. Apply mode performs a second discovery immediately before
+mutation and aborts on stale candidates or safety metadata.
 
 The helper generates the installed app-server schema at runtime and verifies
-the required fields. If the installed Codex does not expose pin state,
-`recencyAt`, runtime status, exact cwd, or descendant filtering, cleanup fails
-closed. There is no unsafe compatibility fallback.
+the required fields. If the installed Codex does not expose section-based pin
+state, `recencyAt`, runtime status, exact cwd, or descendant filtering, cleanup
+fails closed. A missing, duplicated, or malformed `Pinned` section also stops
+cleanup. There is no unsafe compatibility fallback.
 
 The script does not remove or move rollout files and does not edit Codex
 databases, indexes, configuration, authentication, logs, skills, plugins,
@@ -121,9 +121,11 @@ deletion was explicitly requested.
 ## Requirements and compatibility
 
 - Python 3.10 or newer, using only the standard library.
-- An installed `codex` executable on `PATH`.
+- An installed `codex` executable on `PATH`, or a validated `codex`/`codex.js`
+  entry point under `$CODEX_MANAGED_PACKAGE_ROOT/bin`.
 - A Codex app-server schema that exposes pagination, `recencyAt`, exact cwd,
-  pin and runtime state, source/ephemeral metadata, and descendant filtering.
+  `Thread.section`, `threadSection/list`, runtime state, source/ephemeral
+  metadata, and descendant filtering.
 - UUID-based `codex archive` and forced `codex delete` commands.
 
 The helper inherits the runtime environment and trusts the app-server's

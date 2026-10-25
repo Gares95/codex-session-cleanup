@@ -3,11 +3,14 @@ from __future__ import annotations
 import datetime as dt
 import importlib.util
 import io
+import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +23,7 @@ SPEC.loader.exec_module(cleanup)
 
 NOW = dt.datetime(2026, 8, 8, 12, 0, tzinfo=dt.timezone.utc)
 PROJECT = "/home/user/project"
+PINNED_SECTION_ID = "00000000-0000-4000-8000-000000000900"
 
 
 def session_id(number: int) -> str:
@@ -78,13 +82,52 @@ def raw_thread(number: int, **overrides: object) -> dict[str, object]:
         "updatedAt": int((NOW - dt.timedelta(days=9)).timestamp()),
         "recencyAt": int((NOW - dt.timedelta(days=8)).timestamp()),
         "cwd": PROJECT,
-        "isPinned": False,
+        "section": None,
         "ephemeral": False,
         "source": "cli",
         "status": {"type": "notLoaded"},
     }
     value.update(overrides)
     return value
+
+
+def valid_schema_documents() -> tuple[dict[str, object], ...]:
+    list_params = {
+        "properties": {
+            name: {} for name in (
+                "ancestorThreadId", "archived", "cursor", "cwd", "limit",
+                "sectionId", "sortKey", "sortDirection", "sourceKinds",
+                "useStateDbOnly",
+            )
+        },
+        "definitions": {"ThreadSourceKind": {"enum": ["cli", "vscode"]}},
+    }
+    thread_fields = {
+        name: {} for name in (
+            "id", "name", "preview", "createdAt", "updatedAt", "recencyAt",
+            "cwd", "ephemeral", "section", "sessionId", "parentThreadId",
+            "source", "status",
+        )
+    }
+    list_response = {
+        "properties": {"data": {}, "nextCursor": {}},
+        "definitions": {"Thread": {"properties": thread_fields}},
+    }
+    initialize_response = {"properties": {"codexHome": {}}}
+    section_list_params = {"properties": {"cursor": {}, "limit": {}}}
+    section_list_response = {
+        "properties": {"data": {}, "nextCursor": {}},
+        "definitions": {
+            "ThreadSection": {"properties": {"id": {}, "name": {}}}
+        },
+    }
+    return (
+        list_params,
+        list_response,
+        initialize_response,
+        section_list_params,
+        section_list_response,
+    )
 
 
 class RetentionPolicyTests(unittest.TestCase):
@@ -175,26 +218,15 @@ class RetentionPolicyTests(unittest.TestCase):
 
 
 class MetadataAndHomeTests(unittest.TestCase):
-    def test_schema_without_pin_state_fails_closed(self) -> None:
-        params = {
-            "properties": {
-                name: {} for name in (
-                    "ancestorThreadId", "archived", "cursor", "cwd", "sortKey",
-                    "sortDirection", "sourceKinds", "useStateDbOnly",
-                )
-            },
-            "definitions": {"ThreadSourceKind": {"enum": ["cli", "vscode"]}},
-        }
-        thread_fields = {
-            name: {} for name in (
-                "id", "name", "preview", "createdAt", "updatedAt", "recencyAt",
-                "cwd", "ephemeral", "sessionId", "parentThreadId", "source", "status",
-            )
-        }
-        response = {"definitions": {"Thread": {"properties": thread_fields}}}
-        initialize = {"properties": {"codexHome": {}}}
-        with self.assertRaisesRegex(cleanup.CompatibilityError, "isPinned"):
-            cleanup.validate_schema_contract(params, response, initialize)
+    def test_schema_with_section_pin_state_is_accepted(self) -> None:
+        capabilities = cleanup.validate_schema_contract(*valid_schema_documents())
+        self.assertEqual(("cli", "vscode"), capabilities.all_source_kinds)
+
+    def test_schema_without_section_pin_state_fails_closed(self) -> None:
+        schemas = valid_schema_documents()
+        schemas[1]["definitions"]["Thread"]["properties"].pop("section")
+        with self.assertRaisesRegex(cleanup.CompatibilityError, "Thread.section"):
+            cleanup.validate_schema_contract(*schemas)
 
     def test_alternate_codex_home_is_taken_from_initialize(self) -> None:
         alternate = "/tmp/fictional-codex-home"
@@ -208,12 +240,16 @@ class MetadataAndHomeTests(unittest.TestCase):
             )
 
     def test_malformed_or_missing_metadata_fails_safely(self) -> None:
-        for field in ("recencyAt", "isPinned", "cwd", "status"):
+        for field in ("recencyAt", "section", "cwd", "status"):
             with self.subTest(field=field):
                 raw = raw_thread(1)
                 raw.pop(field)
                 with self.assertRaises(ValueError):
-                    cleanup.parse_thread(raw, archived=False)
+                    cleanup.parse_thread(
+                        raw,
+                        archived=False,
+                        pinned_section_id=PINNED_SECTION_ID,
+                    )
 
         malformed = cleanup.UnsafeRecord(session_id(1), "recencyAt is missing")
         plan = cleanup.build_plan(
@@ -228,14 +264,58 @@ class MetadataAndHomeTests(unittest.TestCase):
     def test_recency_at_is_required_and_not_replaced_by_updated_at(self) -> None:
         raw = raw_thread(1, recencyAt=None)
         with self.assertRaisesRegex(ValueError, "recencyAt"):
-            cleanup.parse_thread(raw, archived=False)
+            cleanup.parse_thread(
+                raw,
+                archived=False,
+                pinned_section_id=PINNED_SECTION_ID,
+            )
+
+    def test_thread_pin_state_comes_from_the_builtin_pinned_section(self) -> None:
+        pinned = cleanup.parse_thread(
+            raw_thread(
+                1,
+                section={"id": PINNED_SECTION_ID, "name": "Pinned"},
+            ),
+            archived=False,
+            pinned_section_id=PINNED_SECTION_ID,
+        )
+        custom = cleanup.parse_thread(
+            raw_thread(
+                2,
+                section={"id": session_id(901), "name": "Later"},
+            ),
+            archived=False,
+            pinned_section_id=PINNED_SECTION_ID,
+        )
+        unsectioned = cleanup.parse_thread(
+            raw_thread(3),
+            archived=False,
+            pinned_section_id=PINNED_SECTION_ID,
+        )
+        self.assertTrue(pinned.pinned)
+        self.assertFalse(custom.pinned)
+        self.assertFalse(unsectioned.pinned)
+
+    def test_conflicting_thread_section_metadata_fails_closed(self) -> None:
+        raw = raw_thread(
+            1,
+            section={"id": session_id(901), "name": "Pinned"},
+        )
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            cleanup.parse_thread(
+                raw,
+                archived=False,
+                pinned_section_id=PINNED_SECTION_ID,
+            )
 
     def test_app_server_pagination_is_followed(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
 
-            def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+            def request(
+                self, method: str, params: dict[str, object]
+            ) -> dict[str, object]:
                 self.calls.append(params)
                 if "cursor" not in params:
                     return {"data": [raw_thread(1)], "nextCursor": "fictional-cursor"}
@@ -248,6 +328,92 @@ class MetadataAndHomeTests(unittest.TestCase):
         records = discovery._list_pages({"sourceKinds": ["cli", "vscode"]})
         self.assertEqual(2, len(records))
         self.assertEqual("fictional-cursor", client.calls[1]["cursor"])
+
+    def test_pinned_section_discovery_is_paginated(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+                self.assert_method(method)
+                self.calls.append(params)
+                if "cursor" not in params:
+                    return {
+                        "data": [{"id": session_id(901), "name": "Later"}],
+                        "nextCursor": "fictional-section-cursor",
+                    }
+                return {
+                    "data": [{"id": PINNED_SECTION_ID, "name": "Pinned"}],
+                    "nextCursor": None,
+                }
+
+            @staticmethod
+            def assert_method(method: str) -> None:
+                if method != "threadSection/list":
+                    raise AssertionError(method)
+
+        client = FakeClient()
+        discovery = cleanup.SessionDiscovery(
+            client, cleanup.SchemaCapabilities(("cli", "vscode", "subAgent"))
+        )
+        section = discovery.discover_pinned_section()
+        self.assertEqual(PINNED_SECTION_ID, section.id)
+        self.assertEqual("fictional-section-cursor", client.calls[1]["cursor"])
+
+    def test_bad_pinned_section_discovery_fails_closed(self) -> None:
+        cases = (
+            ([{"id": session_id(901), "name": "Later"}], cleanup.CompatibilityError),
+            (
+                [
+                    {"id": PINNED_SECTION_ID, "name": "Pinned"},
+                    {"id": session_id(902), "name": "Pinned"},
+                ],
+                cleanup.CompatibilityError,
+            ),
+            ([{"id": "not-a-uuid", "name": "Pinned"}], cleanup.ProtocolError),
+        )
+
+        for sections, error in cases:
+            with self.subTest(sections=sections):
+                class FakeClient:
+                    def request(
+                        self, method: str, params: dict[str, object]
+                    ) -> dict[str, object]:
+                        return {"data": sections, "nextCursor": None}
+
+                discovery = cleanup.SessionDiscovery(
+                    FakeClient(), cleanup.SchemaCapabilities(("cli", "vscode"))
+                )
+                with self.assertRaises(error):
+                    discovery.discover_pinned_section()
+
+    @mock.patch.object(cleanup.shutil, "which", return_value="/path/to/codex")
+    def test_codex_on_path_is_preferred(self, _: mock.Mock) -> None:
+        result = cleanup.find_codex(
+            environment={
+                "PATH": "/path/to/bin",
+                "CODEX_MANAGED_PACKAGE_ROOT": "/path/to/managed-package",
+            }
+        )
+        self.assertEqual("/path/to/codex", result)
+
+    @unittest.skipIf(os.name == "nt", "POSIX executable mode test")
+    @mock.patch.object(cleanup.shutil, "which", return_value=None)
+    def test_managed_codex_binary_is_a_narrow_fallback(self, _: mock.Mock) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            candidate = bin_dir / "codex.js"
+            candidate.write_text("fictional executable", encoding="utf-8")
+            candidate.chmod(0o700)
+            result = cleanup.find_codex(
+                environment={
+                    "PATH": "",
+                    "CODEX_MANAGED_PACKAGE_ROOT": str(root),
+                }
+            )
+        self.assertEqual(str(candidate), result)
 
 
 class DescendantSafetyTests(unittest.TestCase):
