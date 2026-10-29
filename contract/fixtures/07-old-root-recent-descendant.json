@@ -1,0 +1,68 @@
+{
+  "format": "session-cleanup/conformance-case",
+  "version": 1,
+  "id": "old-root-recent-descendant",
+  "description": "A recently active descendant keeps its old root: group activity is the newest member's.",
+  "requires": [],
+  "evaluated_at": "2026-10-25T12:00:00Z",
+  "scope": {
+    "mode": "current",
+    "path": "/work/repo"
+  },
+  "policy": {
+    "older_than_hours": 720,
+    "keep_latest": null
+  },
+  "sessions": [
+    {
+      "id": "a",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 2160,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "a1",
+      "parent": "a",
+      "project": "/work/repo",
+      "hours_ago": 2,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "b",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 2160,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "b1",
+      "parent": "b",
+      "project": "/work/repo",
+      "hours_ago": 1500,
+      "state": "idle",
+      "metadata": "valid"
+    }
+  ],
+  "expected": [
+    {
+      "group": "a",
+      "status": "retained",
+      "rank": 1,
+      "reasons_include": [
+        "newer-than-cutoff"
+      ]
+    },
+    {
+      "group": "b",
+      "status": "selected",
+      "rank": 2,
+      "reasons_include": [
+        "older-than"
+      ]
+    }
+  ]
+}

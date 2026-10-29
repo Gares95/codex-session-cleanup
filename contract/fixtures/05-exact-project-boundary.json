@@ -1,0 +1,68 @@
+{
+  "format": "session-cleanup/conformance-case",
+  "version": 1,
+  "id": "exact-project-boundary",
+  "description": "Current scope matches the exact directory only: parents, children, sibling worktrees, and other projects are out of scope.",
+  "requires": [],
+  "evaluated_at": "2026-10-25T12:00:00Z",
+  "scope": {
+    "mode": "current",
+    "path": "/work/repo"
+  },
+  "policy": {
+    "older_than_hours": 168,
+    "keep_latest": null
+  },
+  "sessions": [
+    {
+      "id": "a",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 240,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "b",
+      "parent": null,
+      "project": "/work",
+      "hours_ago": 240,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "c",
+      "parent": null,
+      "project": "/work/repo/sub",
+      "hours_ago": 240,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "d",
+      "parent": null,
+      "project": "/work/repo-feature",
+      "hours_ago": 240,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "e",
+      "parent": null,
+      "project": "/other/repo",
+      "hours_ago": 240,
+      "state": "idle",
+      "metadata": "valid"
+    }
+  ],
+  "expected": [
+    {
+      "group": "a",
+      "status": "selected",
+      "rank": 1,
+      "reasons_include": [
+        "older-than"
+      ]
+    }
+  ]
+}

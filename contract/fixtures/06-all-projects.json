@@ -1,0 +1,68 @@
+{
+  "format": "session-cleanup/conformance-case",
+  "version": 1,
+  "id": "all-projects",
+  "description": "All scope evaluates every project; equal activity is ordered by group id.",
+  "requires": [],
+  "evaluated_at": "2026-10-25T12:00:00Z",
+  "scope": {
+    "mode": "all",
+    "path": null
+  },
+  "policy": {
+    "older_than_hours": 168,
+    "keep_latest": null
+  },
+  "sessions": [
+    {
+      "id": "a",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 240,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "b",
+      "parent": null,
+      "project": "/work",
+      "hours_ago": 240,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "c",
+      "parent": null,
+      "project": "/other/repo",
+      "hours_ago": 24,
+      "state": "idle",
+      "metadata": "valid"
+    }
+  ],
+  "expected": [
+    {
+      "group": "c",
+      "status": "retained",
+      "rank": 1,
+      "reasons_include": [
+        "newer-than-cutoff"
+      ]
+    },
+    {
+      "group": "a",
+      "status": "selected",
+      "rank": 2,
+      "reasons_include": [
+        "older-than"
+      ]
+    },
+    {
+      "group": "b",
+      "status": "selected",
+      "rank": 3,
+      "reasons_include": [
+        "older-than"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "format": "session-cleanup/conformance-case",
+  "version": 1,
+  "id": "pinned-group-protected",
+  "description": "A pinned group is protected regardless of age (backends with pinning only).",
+  "requires": [
+    "pinning"
+  ],
+  "evaluated_at": "2026-10-25T12:00:00Z",
+  "scope": {
+    "mode": "current",
+    "path": "/work/repo"
+  },
+  "policy": {
+    "older_than_hours": 168,
+    "keep_latest": null
+  },
+  "sessions": [
+    {
+      "id": "a",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 240,
+      "state": "pinned",
+      "metadata": "valid"
+    },
+    {
+      "id": "b",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 240,
+      "state": "idle",
+      "metadata": "valid"
+    }
+  ],
+  "expected": [
+    {
+      "group": "a",
+      "status": "protected",
+      "rank": 1,
+      "reasons_include": [
+        "pinned"
+      ]
+    },
+    {
+      "group": "b",
+      "status": "selected",
+      "rank": 2,
+      "reasons_include": [
+        "older-than"
+      ]
+    }
+  ]
+}

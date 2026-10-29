@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import hashlib
 import importlib.util
 import io
 import json
@@ -147,6 +148,33 @@ def plan_document(plan: cleanup.Plan) -> dict[str, object]:
         "/tmp/fictional-codex-home",
         codex_version="codex-cli 0.test",
     )
+
+
+class ContractIntegrityTests(unittest.TestCase):
+    def test_vendored_contract_matches_sha256sums(self) -> None:
+        contract_dir = ROOT / "contract"
+        sums_path = contract_dir / "SHA256SUMS"
+        listed: set[str] = set()
+        for line in sums_path.read_text(encoding="utf-8").splitlines():
+            digest, relative_name = line.split("  ", 1)
+            relative = Path(relative_name)
+            self.assertFalse(relative.is_absolute())
+            self.assertNotIn("..", relative.parts)
+            path = contract_dir / relative
+            self.assertTrue(path.is_file(), relative_name)
+            self.assertEqual(
+                digest,
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                relative_name,
+            )
+            listed.add(relative.as_posix())
+
+        present = {
+            path.relative_to(contract_dir).as_posix()
+            for path in contract_dir.rglob("*")
+            if path.is_file() and path.name != "SHA256SUMS"
+        }
+        self.assertEqual(listed, present)
 
 
 class RetentionPolicyTests(unittest.TestCase):

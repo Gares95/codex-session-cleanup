@@ -1,0 +1,68 @@
+{
+  "format": "session-cleanup/conformance-case",
+  "version": 1,
+  "id": "keep-latest",
+  "description": "The N most recently active groups are retained; the rest are selected.",
+  "requires": [],
+  "evaluated_at": "2026-10-25T12:00:00Z",
+  "scope": {
+    "mode": "current",
+    "path": "/work/repo"
+  },
+  "policy": {
+    "older_than_hours": null,
+    "keep_latest": 2
+  },
+  "sessions": [
+    {
+      "id": "a",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 24,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "b",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 48,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "c",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 72,
+      "state": "idle",
+      "metadata": "valid"
+    }
+  ],
+  "expected": [
+    {
+      "group": "a",
+      "status": "retained",
+      "rank": 1,
+      "reasons_include": [
+        "within-latest"
+      ]
+    },
+    {
+      "group": "b",
+      "status": "retained",
+      "rank": 2,
+      "reasons_include": [
+        "within-latest"
+      ]
+    },
+    {
+      "group": "c",
+      "status": "selected",
+      "rank": 3,
+      "reasons_include": [
+        "outside-latest"
+      ]
+    }
+  ]
+}

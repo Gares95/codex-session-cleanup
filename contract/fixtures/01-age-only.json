@@ -1,0 +1,68 @@
+{
+  "format": "session-cleanup/conformance-case",
+  "version": 1,
+  "id": "age-only",
+  "description": "Groups older than the cutoff are selected; the cutoff is strict, so a group exactly at the cutoff is retained.",
+  "requires": [],
+  "evaluated_at": "2026-10-25T12:00:00Z",
+  "scope": {
+    "mode": "current",
+    "path": "/work/repo"
+  },
+  "policy": {
+    "older_than_hours": 168,
+    "keep_latest": null
+  },
+  "sessions": [
+    {
+      "id": "a",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 240,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "b",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 48,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "c",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 168,
+      "state": "idle",
+      "metadata": "valid"
+    }
+  ],
+  "expected": [
+    {
+      "group": "a",
+      "status": "selected",
+      "rank": 3,
+      "reasons_include": [
+        "older-than"
+      ]
+    },
+    {
+      "group": "b",
+      "status": "retained",
+      "rank": 1,
+      "reasons_include": [
+        "newer-than-cutoff"
+      ]
+    },
+    {
+      "group": "c",
+      "status": "retained",
+      "rank": 2,
+      "reasons_include": [
+        "newer-than-cutoff"
+      ]
+    }
+  ]
+}

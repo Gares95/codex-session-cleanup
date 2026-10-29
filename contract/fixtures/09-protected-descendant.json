@@ -1,0 +1,60 @@
+{
+  "format": "session-cleanup/conformance-case",
+  "version": 1,
+  "id": "protected-descendant",
+  "description": "A running descendant protects its whole group.",
+  "requires": [],
+  "evaluated_at": "2026-10-25T12:00:00Z",
+  "scope": {
+    "mode": "current",
+    "path": "/work/repo"
+  },
+  "policy": {
+    "older_than_hours": 720,
+    "keep_latest": null
+  },
+  "sessions": [
+    {
+      "id": "a",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 1500,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "a1",
+      "parent": "a",
+      "project": "/work/repo",
+      "hours_ago": 1500,
+      "state": "running",
+      "metadata": "valid"
+    },
+    {
+      "id": "b",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 1500,
+      "state": "idle",
+      "metadata": "valid"
+    }
+  ],
+  "expected": [
+    {
+      "group": "a",
+      "status": "protected",
+      "rank": 1,
+      "reasons_include": [
+        "running"
+      ]
+    },
+    {
+      "group": "b",
+      "status": "selected",
+      "rank": 2,
+      "reasons_include": [
+        "older-than"
+      ]
+    }
+  ]
+}

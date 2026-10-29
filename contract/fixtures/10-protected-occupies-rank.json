@@ -1,0 +1,53 @@
+{
+  "format": "session-cleanup/conformance-case",
+  "version": 1,
+  "id": "protected-occupies-rank",
+  "description": "Protected groups occupy latest-N ranks.",
+  "requires": [],
+  "evaluated_at": "2026-10-25T12:00:00Z",
+  "scope": {
+    "mode": "current",
+    "path": "/work/repo"
+  },
+  "policy": {
+    "older_than_hours": null,
+    "keep_latest": 1
+  },
+  "sessions": [
+    {
+      "id": "a",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 2,
+      "state": "running",
+      "metadata": "valid"
+    },
+    {
+      "id": "b",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 24,
+      "state": "idle",
+      "metadata": "valid"
+    }
+  ],
+  "expected": [
+    {
+      "group": "a",
+      "status": "protected",
+      "rank": 1,
+      "reasons_include": [
+        "running",
+        "within-latest"
+      ]
+    },
+    {
+      "group": "b",
+      "status": "selected",
+      "rank": 2,
+      "reasons_include": [
+        "outside-latest"
+      ]
+    }
+  ]
+}

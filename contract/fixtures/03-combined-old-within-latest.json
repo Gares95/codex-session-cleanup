@@ -1,0 +1,70 @@
+{
+  "format": "session-cleanup/conformance-case",
+  "version": 1,
+  "id": "combined-old-within-latest",
+  "description": "Intersection: an old group inside the latest N is retained.",
+  "requires": [],
+  "evaluated_at": "2026-10-25T12:00:00Z",
+  "scope": {
+    "mode": "current",
+    "path": "/work/repo"
+  },
+  "policy": {
+    "older_than_hours": 720,
+    "keep_latest": 2
+  },
+  "sessions": [
+    {
+      "id": "a",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 24,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "b",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 960,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "c",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 1200,
+      "state": "idle",
+      "metadata": "valid"
+    }
+  ],
+  "expected": [
+    {
+      "group": "a",
+      "status": "retained",
+      "rank": 1,
+      "reasons_include": [
+        "within-latest",
+        "newer-than-cutoff"
+      ]
+    },
+    {
+      "group": "b",
+      "status": "retained",
+      "rank": 2,
+      "reasons_include": [
+        "within-latest"
+      ]
+    },
+    {
+      "group": "c",
+      "status": "selected",
+      "rank": 3,
+      "reasons_include": [
+        "older-than",
+        "outside-latest"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-cleanup/preview-v1.schema.json",
+  "title": "Session cleanup preview, schema version 1",
+  "description": "Shared preview document for claude-session-cleanup and codex-session-cleanup. See SPEC.md. Core objects are closed; backend-specific data belongs in extensions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "agent", "agent_version", "tool", "mode", "changes_made", "evaluated_at", "scope", "policy", "activity_timestamp", "capabilities", "totals", "groups", "warnings", "extensions"],
+  "properties": {
+    "schema": {"const": "session-cleanup/preview"},
+    "schema_version": {"const": 1},
+    "agent": {"enum": ["claude-code", "codex"]},
+    "agent_version": {"type": ["string", "null"]},
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {"name": {"type": "string"}, "version": {"type": "string"}}
+    },
+    "mode": {"const": "preview"},
+    "changes_made": {"const": false},
+    "evaluated_at": {"$ref": "#/$defs/timestamp"},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "path"],
+      "properties": {
+        "mode": {"enum": ["current", "all"]},
+        "path": {"type": ["string", "null"]}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["older_than_seconds", "cutoff", "keep_latest", "min_idle_seconds", "combination", "ranking_unit", "requested_action"],
+      "properties": {
+        "older_than_seconds": {"type": ["integer", "null"], "minimum": 1},
+        "cutoff": {"$ref": "#/$defs/optionalTimestamp"},
+        "keep_latest": {"type": ["integer", "null"], "minimum": 1},
+        "min_idle_seconds": {"type": ["integer", "null"], "minimum": 1},
+        "combination": {"const": "intersection"},
+        "ranking_unit": {"const": "root-group"},
+        "requested_action": {"enum": [null, "archive", "quarantine", "delete"]}
+      }
+    },
+    "activity_timestamp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "kind", "resolution", "conservative"],
+      "properties": {
+        "source": {"type": "string"},
+        "kind": {"enum": ["agent-reported", "derived"]},
+        "resolution": {"type": "string"},
+        "conservative": {"type": "boolean"}
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actions", "sizes", "titles", "pinning", "active_session_detection"],
+      "properties": {
+        "actions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["archive", "quarantine", "delete"],
+          "properties": {
+            "archive": {"$ref": "#/$defs/action", "properties": {"reversibility": {"const": "agent-native"}}},
+            "quarantine": {"$ref": "#/$defs/action", "properties": {"reversibility": {"const": "tool-managed"}}},
+            "delete": {"$ref": "#/$defs/action", "properties": {"reversibility": {"const": "irreversible"}}}
+          }
+        },
+        "sizes": {"type": "boolean"},
+        "titles": {"type": "boolean"},
+        "pinning": {"type": "boolean"},
+        "active_session_detection": {"enum": ["agent-reported", "partial", "none"]}
+      }
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["groups", "sessions", "bytes", "reasons"],
+      "properties": {
+        "groups": {"$ref": "#/$defs/statusCounts"},
+        "sessions": {"$ref": "#/$defs/statusCounts"},
+        "bytes": {"$ref": "#/$defs/optionalStatusCounts"},
+        "reasons": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["selected", "retained", "protected", "excluded"],
+          "properties": {
+            "selected": {"$ref": "#/$defs/reasonCounts"},
+            "retained": {"$ref": "#/$defs/reasonCounts"},
+            "protected": {"$ref": "#/$defs/reasonCounts"},
+            "excluded": {"$ref": "#/$defs/reasonCounts"}
+          }
+        }
+      }
+    },
+    "groups": {"type": "array", "items": {"$ref": "#/$defs/group"}},
+    "warnings": {"type": "array", "items": {"$ref": "#/$defs/notice"}},
+    "extensions": {"$ref": "#/$defs/extensions"}
+  },
+  "$defs": {
+    "timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "optionalTimestamp": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "code": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+    "extensions": {"type": "object", "additionalProperties": false, "properties": {"claude_code": {"type": "object"}, "codex": {"type": "object"}}},
+    "notice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "subject"],
+      "properties": {"code": {"$ref": "#/$defs/code"}, "subject": {"type": ["string", "null"]}}
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["supported", "reversibility", "requires_saved_plan", "unsupported_reason"],
+      "properties": {
+        "supported": {"type": "boolean"},
+        "reversibility": {"enum": ["agent-native", "tool-managed", "irreversible"]},
+        "requires_saved_plan": {"type": "boolean"},
+        "unsupported_reason": {"type": ["string", "null"]}
+      }
+    },
+    "statusCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["examined", "selected", "retained", "protected", "excluded"],
+      "properties": {
+        "examined": {"type": "integer", "minimum": 0},
+        "selected": {"type": "integer", "minimum": 0},
+        "retained": {"type": "integer", "minimum": 0},
+        "protected": {"type": "integer", "minimum": 0},
+        "excluded": {"type": "integer", "minimum": 0}
+      }
+    },
+    "optionalStatusCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["examined", "selected", "retained", "protected", "excluded"],
+      "properties": {
+        "examined": {"type": ["integer", "null"], "minimum": 0},
+        "selected": {"type": ["integer", "null"], "minimum": 0},
+        "retained": {"type": ["integer", "null"], "minimum": 0},
+        "protected": {"type": ["integer", "null"], "minimum": 0},
+        "excluded": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "reasonCounts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}},
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["group_id", "status", "reasons", "rank", "proposed_action", "last_activity", "last_activity_session_id", "bytes", "session_count", "sessions", "mutation_blockers", "extensions"],
+      "properties": {
+        "group_id": {"type": "string"},
+        "status": {"enum": ["selected", "retained", "protected", "excluded"]},
+        "reasons": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/code"}},
+        "rank": {"type": ["integer", "null"], "minimum": 1},
+        "proposed_action": {"enum": [null, "archive", "quarantine", "delete"]},
+        "last_activity": {"$ref": "#/$defs/timestamp"},
+        "last_activity_session_id": {"type": "string"},
+        "bytes": {"type": ["integer", "null"], "minimum": 0},
+        "session_count": {"type": "integer", "minimum": 1},
+        "sessions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/session"}},
+        "mutation_blockers": {"type": "array", "items": {"$ref": "#/$defs/code"}},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "relation", "parent_session_id", "title", "title_source", "project_path", "project_identity", "created_at", "last_activity", "last_activity_source", "bytes", "issues", "extensions"],
+      "properties": {
+        "session_id": {"type": "string"},
+        "relation": {"enum": ["root", "descendant", "continuation"]},
+        "parent_session_id": {"type": ["string", "null"]},
+        "title": {"type": ["string", "null"]},
+        "title_source": {"type": ["string", "null"]},
+        "project_path": {"type": ["string", "null"]},
+        "project_identity": {"enum": ["verified", "unverified", "unknown"]},
+        "created_at": {"$ref": "#/$defs/optionalTimestamp"},
+        "last_activity": {"$ref": "#/$defs/timestamp"},
+        "last_activity_source": {"type": "string"},
+        "bytes": {"type": ["integer", "null"], "minimum": 0},
+        "issues": {"type": "array", "items": {"$ref": "#/$defs/notice"}},
+        "extensions": {"$ref": "#/$defs/extensions"}
+      }
+    }
+  }
+}

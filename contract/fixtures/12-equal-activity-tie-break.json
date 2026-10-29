@@ -1,0 +1,68 @@
+{
+  "format": "session-cleanup/conformance-case",
+  "version": 1,
+  "id": "equal-activity-tie-break",
+  "description": "Equal last activity is ordered by group id ascending.",
+  "requires": [],
+  "evaluated_at": "2026-10-25T12:00:00Z",
+  "scope": {
+    "mode": "current",
+    "path": "/work/repo"
+  },
+  "policy": {
+    "older_than_hours": null,
+    "keep_latest": 1
+  },
+  "sessions": [
+    {
+      "id": "b",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 48,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "a",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 48,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "c",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 48,
+      "state": "idle",
+      "metadata": "valid"
+    }
+  ],
+  "expected": [
+    {
+      "group": "a",
+      "status": "retained",
+      "rank": 1,
+      "reasons_include": [
+        "within-latest"
+      ]
+    },
+    {
+      "group": "b",
+      "status": "selected",
+      "rank": 2,
+      "reasons_include": [
+        "outside-latest"
+      ]
+    },
+    {
+      "group": "c",
+      "status": "selected",
+      "rank": 3,
+      "reasons_include": [
+        "outside-latest"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+{
+  "format": "session-cleanup/conformance-case",
+  "version": 1,
+  "id": "latest-n-counts-groups",
+  "description": "Each group counts once toward the latest N, however many recent descendants it has.",
+  "requires": [],
+  "evaluated_at": "2026-10-25T12:00:00Z",
+  "scope": {
+    "mode": "current",
+    "path": "/work/repo"
+  },
+  "policy": {
+    "older_than_hours": null,
+    "keep_latest": 2
+  },
+  "sessions": [
+    {
+      "id": "a",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 240,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "a1",
+      "parent": "a",
+      "project": "/work/repo",
+      "hours_ago": 1,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "a2",
+      "parent": "a1",
+      "project": "/work/repo",
+      "hours_ago": 2,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "b",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 72,
+      "state": "idle",
+      "metadata": "valid"
+    },
+    {
+      "id": "c",
+      "parent": null,
+      "project": "/work/repo",
+      "hours_ago": 96,
+      "state": "idle",
+      "metadata": "valid"
+    }
+  ],
+  "expected": [
+    {
+      "group": "a",
+      "status": "retained",
+      "rank": 1,
+      "reasons_include": [
+        "within-latest"
+      ]
+    },
+    {
+      "group": "b",
+      "status": "retained",
+      "rank": 2,
+      "reasons_include": [
+        "within-latest"
+      ]
+    },
+    {
+      "group": "c",
+      "status": "selected",
+      "rank": 3,
+      "reasons_include": [
+        "outside-latest"
+      ]
+    }
+  ]
+}
