@@ -16,9 +16,10 @@ Use only the helper's narrow policy arguments:
 
 - Map “older than 48 hours” to `--older-than 48h`; durations are positive whole
   hours or days such as `24h`, `7d`, and `30d`.
-- Map “keep my latest 5 sessions” to `--keep-latest 5`.
+- Map “keep my latest 5 sessions” to `--keep-latest 5`, meaning five root
+  conversations rather than five individual thread records.
 - Combine both selectors when requested. They use intersection semantics, so a
-  session must be older than the cutoff and outside latest N.
+  conversation must be older than the cutoff and outside latest N.
 - Use `--project current` unless the user explicitly requests all projects.
   Current means an exact match with the directory where the helper is run.
 - Use `--project all` only for wording such as “across all projects.”
@@ -30,11 +31,24 @@ Use only the helper's narrow policy arguments:
   or latest-count policy and explain that this skill affects session history
   only.
 
-Latest N ranks ordinary interactive roots and all discoverable spawned
-descendants within the selected project scope. Descendants consume latest-N
-positions. An otherwise eligible root is protected if any descendant must be
-retained, is pinned/loaded/active/unsafe, has malformed ancestry, or crosses an
-exact current-project boundary.
+One conversation is an ordinary interactive root plus all discoverable spawned
+descendants affected by Codex's cascade. Its activity is the newest
+`recencyAt` among those members. Each conversation consumes one latest-N slot,
+not one slot per descendant. Protected conversations still rank; excluded
+conversations do not. Equal activity is ordered by root UUID.
+
+Use the helper's four outcomes exactly:
+
+- `selected` is eligible for the requested action;
+- `retained` is kept by the age/latest-count policy;
+- `protected` is kept by a safety rule such as pinning or runtime activity;
+- `excluded` cannot safely participate because its scope, metadata, or group
+  identity is uncertain.
+
+Exclusion happens before ranking. A root or descendant that is pinned, loaded,
+active, ephemeral, or otherwise unsafe protects the entire conversation.
+Malformed or ambiguous ancestry and descendants outside the exact current cwd
+exclude the entire conversation. Never guess around an exclusion.
 
 Do not reinterpret a request as permission to alter logs, configuration,
 authentication, worktrees, memories, skills, plugins, or other Codex state.
@@ -50,9 +64,12 @@ python3 <skill-directory>/scripts/cleanup_sessions.py \
 ```
 
 Use `--details` when the user needs full UUIDs and expanded state. Use `--json`
-when structured output is requested. Summarize selected roots, every cascading
-descendant, and protection/exclusion reasons. Confirm that no changes were
-made. For delete previews, call out the irreversible warning.
+when shared structured preview output is requested. JSON titles are `null`
+unless the user explicitly asks for identifying titles; only then add
+`--include-titles`. Summarize selected, retained, protected, and excluded
+conversation groups, every cascading descendant, and reason codes. Confirm
+that no changes were made. For delete previews, call out the irreversible
+warning.
 
 If compatibility or metadata validation fails, stop. Do not fall back to
 rollout paths, filesystem timestamps, direct database reads, or raw deletion.
@@ -105,6 +122,10 @@ recency, pin/load/activity, project scope, or other safety state changed, it
 marks/refuses the stale plan. Never edit or reuse an applying, stale, partially
 consumed, or consumed plan; generate and review a new preview.
 
+The JSON preview schema is not the deletion manifest and never authorizes
+mutation. Do not attempt to apply JSON captured from `--json`; only a private
+manifest created by `--save-plan` is accepted by `--apply-plan`.
+
 ## Report the outcome
 
 After a preview, identify what would happen and say no changes were made. After
@@ -119,3 +140,9 @@ Codex command. The helper's standalone app-server also cannot prove that a
 different app-server process has not loaded a thread. Recommend closing other
 Codex clients before apply; Codex's own ownership checks are the final
 authority.
+
+Discovery intentionally uses `thread/list` with `useStateDbOnly: true` so a
+preview does not scan rollout files and repair Codex metadata. Unindexed
+history may therefore be omitted. Do not switch to scan-and-repair discovery
+silently. The tool offers Codex-native archive and irreversible delete; it does
+not offer or emulate a separate quarantine action.

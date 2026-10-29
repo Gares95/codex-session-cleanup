@@ -241,7 +241,7 @@ Latest N ranks root conversations; each root plus its descendants counts once.
         "--older-than",
         type=parse_duration,
         metavar="DURATION",
-        help="select sessions last used before the fixed age cutoff (for example 48h or 7d)",
+        help="select conversations last used before the fixed age cutoff (for example 48h or 7d)",
     )
     parser.add_argument(
         "--keep-latest",

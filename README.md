@@ -9,7 +9,7 @@ The helper never edits Codex files, databases, indexes, or other internal state
 directly. Python 3.10+ and the standard library are sufficient.
 
 > [!IMPORTANT]
-> **Compatibility status (last verified 2026-10-25):** Codex CLI 0.164.0
+> **Compatibility status (last verified 2026-10-29):** Codex CLI 0.165.0
 > exposes pinning through `Thread.section` and paginated
 > `threadSection/list`. The helper discovers the unique built-in `Pinned`
 > section and validates the installed generated schema on every invocation.
@@ -20,32 +20,52 @@ directly. Python 3.10+ and the standard library are sufficient.
 
 Supported selectors are deliberately narrow:
 
-- `--older-than 48h` or `--older-than 7d` selects sessions whose `recencyAt`
-  is strictly before the absolute cutoff.
-- `--keep-latest 5` protects the five most recently used sessions.
-- Combining selectors uses intersection semantics: a session must be older
-  than the cutoff **and** outside the latest N to be eligible.
+- `--older-than 48h` or `--older-than 7d` selects conversations whose newest
+  member `recencyAt` is strictly before the absolute cutoff.
+- `--keep-latest 5` retains the five most recently active conversations.
+- Combining selectors uses intersection semantics: a conversation must be
+  older than the cutoff **and** outside the latest N to be eligible.
 - `--project current` is the default and requires an exact match with the cwd
-  from which the helper is invoked.
+  from which the helper is invoked after physical-path and Unicode NFC
+  normalization. Parents, children, siblings, and similarly named paths do not
+  match.
 - `--project all` explicitly considers all discoverable projects.
 - `--action archive` is the default. Permanent deletion must be explicit.
 
-The latest-N ranking universe is all safely parsed ordinary interactive roots
-plus every safely parsed spawned descendant discovered beneath those roots
-within the selected project scope. Descendants therefore consume latest-N
-positions. Pinned, loaded, active, and otherwise protected sessions also remain
-in this ranking universe, so `--keep-latest N` preserves at least N sessions,
-not N additional unprotected sessions.
+One conversation is an ordinary interactive root thread plus every spawned
+descendant that Codex would affect when acting on that root. Its activity is
+the newest `recencyAt` among all members. Each conversation consumes at most
+one latest-N position, regardless of its number of descendants. Non-excluded
+conversations are ranked by activity descending and then root UUID ascending.
+Pinned, loaded, active, and otherwise protected conversations still consume a
+rank. Excluded conversations do not.
 
-Codex archive/delete operations cascade from a selected root. A root is
-blocked if **any** affected descendant:
+Every in-scope conversation has one outcome:
 
-- is too recent or falls within latest N;
+- `selected`: eligible for the requested action;
+- `retained`: kept by `within-latest` or `newer-than-cutoff` policy rules;
+- `protected`: kept because a safety rule such as `pinned`, `running`, or
+  `ephemeral` prevents mutation; and
+- `excluded`: not ranked because metadata, ancestry, identity, or exact scope
+  cannot be established safely.
+
+Precedence is excluded, protected, retained, then selected. A protected
+conversation still reports applicable retention reasons. Exclusion happens
+before ranking, so uncertain data can only move another conversation into the
+kept latest-N set.
+
+Codex archive/delete operations cascade from a selected root. A conversation
+cannot be selected if **any** affected descendant:
+
+- makes the conversation too recent or within latest N;
 - is pinned, loaded, active, ephemeral, errored, or malformed;
 - crosses the exact cwd boundary for `--project current`; or
 - has missing, cyclic, conflicting, or otherwise ambiguous ancestry.
 
-The helper never detaches or independently mutates descendants.
+The helper never detaches or independently mutates descendants. Archive is a
+Codex-native operation that Codex can reverse with `codex unarchive`.
+Permanent delete is irreversible. This tool does not offer a separate
+quarantine operation.
 
 ## Discovery scope
 
@@ -67,7 +87,11 @@ Discovery uses `thread/list` with `useStateDbOnly: true`. Consequently:
   descendant blocks its root.
 
 This utility does not claim to cover every file that may exist in Codex
-history.
+history. Codex 0.165.0 still documents and exposes a normal `thread/list` mode
+that scans rollout files and repairs state-database metadata. The helper does
+not use that mode because a preview must not silently repair local Codex state.
+There is currently no supported way to gain that extra completeness while
+preserving the same strict read-only preview behavior.
 
 ## Safety model
 
@@ -78,9 +102,15 @@ and pagination. Missing or malformed safety metadata stops or excludes the
 affected operation rather than being guessed.
 
 Human previews include sanitized titles, last-used time and age, project path,
-archived state, root/descendant relationships, affected descendants, and
-protection reasons. `--details` prints full UUIDs and expanded state. `--json`
-emits the same versioned plan structure used by saved manifests.
+archived state, root/descendant relationships, every group outcome, and shared
+reason codes. `--details` prints full UUIDs and expanded state.
+
+`--json` emits the shared `session-cleanup/preview` draft-1 structure defined
+under `contract/`. Titles are `null` by default and appear only with
+`--include-titles`. Preview JSON is an audit/reporting artifact and cannot
+authorize mutation. It is deliberately separate from the private saved-plan
+manifest used by `--save-plan` and `--apply-plan`; JSON preview mode cannot be
+combined with an apply mode.
 
 Before mutation, cooperating cleanup processes take a per-Codex-home advisory
 lock. The helper re-discovers the remaining expected candidate set immediately
@@ -92,7 +122,7 @@ cannot prove that an independent Codex/app-server process has not loaded a
 thread after discovery. Close other Codex clients before applying cleanup. The
 CLI's own ownership/refusal behavior remains an important final safeguard.
 
-The installed 0.164.0 archive/delete APIs accept a thread ID but expose no
+The installed 0.165.0 archive/delete APIs accept a thread ID but expose no
 conditional state token or atomic compare-and-mutate operation. A session can
 still change in the small interval between the last read and the Codex command.
 Codex ownership/refusal checks remain the final authority; the helper never
@@ -114,6 +144,11 @@ and all safety-critical metadata. It is created with mode `0600` on POSIX. Its
 digest detects accidental editing, but safety does not rely on the digest.
 Apply also regenerates the plan from Codex and compares the full effective
 candidate set.
+
+Manifests keep the Codex-specific `codex-session-cleanup-plan` format; they do
+not use the shared preview schema. A manifest created under older per-session
+latest-N semantics is re-evaluated using conversation groups and is refused as
+stale if its effective candidate set differs.
 
 Changed membership, a new descendant, recency changes, new pin/load/activity,
 project changes, or malformed metadata makes the plan stale. A stale,
@@ -188,7 +223,7 @@ python3 <skill-directory>/scripts/cleanup_sessions.py \
 No policy flags are accepted with `--apply-plan`; the reviewed manifest is the
 policy and candidate authority.
 
-### 5. Keep the most recent N sessions
+### 5. Keep the most recent N conversations
 
 ```bash
 python3 <skill-directory>/scripts/cleanup_sessions.py \
@@ -226,20 +261,25 @@ python3 <skill-directory>/scripts/cleanup_sessions.py \
   --older-than 30d --project current --action delete --json
 ```
 
-The JSON `format` is `codex-session-cleanup-plan`, currently version `1`.
-Text output, JSON output, and saved manifests are rendered from the same plan
-object. The stable top-level JSON fields are:
+The document has `schema: "session-cleanup/preview"` and
+`schema_version: 1`, but the shared contract is still **draft 1**, not a stable
+release claim. It reports selected, retained, protected, and excluded groups,
+their ranks and reason codes, all root/descendant members, Codex capabilities,
+and Codex-specific metadata under `extensions.codex`.
 
-- `format`, `version`, `planId`, `state`, and `createdAt`;
-- `codexHome`, `codexVersion`, `policy`, `scope`, and `summary`;
-- `candidates`, with each selected root and all cascading descendants;
-- `protected` and `malformed`, with reasons and blocking descendants; and
-- `changesMade`, `application`, and `integrity`.
+Titles are omitted by default. Request them explicitly when needed for local
+review:
 
-Session records contain identifying metadata and safety state, not conversation
-contents. Treat JSON output as private for the same reason as saved manifests.
-A future incompatible structure will increment `version` and old manifests
-will fail closed.
+```bash
+python3 <skill-directory>/scripts/cleanup_sessions.py \
+  --older-than 30d --project current --action delete \
+  --json --include-titles
+```
+
+Preview JSON contains identifiers and local project paths even without titles,
+so treat it as private. It contains no conversation messages, tool output, or
+file content. The private mutation manifest remains a different backend-specific
+document created only with `--save-plan`.
 
 ### Archive after review
 
@@ -279,6 +319,10 @@ Run the standard-library suite, including the isolated fake Codex integration:
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+The suite verifies the vendored contract checksums, all 15 shared conformance
+fixtures, shared preview schema shape, saved-plan replay/staleness rules, and
+isolated fake-Codex mutation behavior.
 
 Validate skill frontmatter with the `quick_validate.py` helper bundled with
 Codex's `skill-creator` skill. Tests use fictional UUIDs and temporary state;
