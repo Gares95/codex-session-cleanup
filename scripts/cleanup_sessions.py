@@ -43,6 +43,7 @@ PINNED_SECTION_NAME = "Pinned"
 DURATION_RE = re.compile(r"([1-9][0-9]*)([hd])\Z")
 PLAN_FORMAT = "codex-session-cleanup-plan"
 PLAN_VERSION = 1
+TOOL_VERSION = "0.1.0"
 EXIT_ERROR = 1
 EXIT_INVALID_PLAN = 2
 EXIT_STALE_PLAN = 3
@@ -100,6 +101,7 @@ class Session:
     session_id: str
     source_kind: str
     loaded: bool = False
+    title_source: str | None = None
 
     @property
     def unsafe(self) -> bool:
@@ -129,6 +131,17 @@ class Protection:
 
 
 @dataclasses.dataclass(frozen=True)
+class GroupEvaluation:
+    tree: Candidate
+    status: str
+    reasons: tuple[str, ...]
+    rank: int | None
+    activity: dt.datetime
+    activity_session_id: str
+    issues: tuple[UnsafeRecord, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True)
 class Plan:
     policy: Policy
     now: dt.datetime
@@ -140,7 +153,8 @@ class Plan:
     trees: tuple[Candidate, ...]
     candidates: tuple[Candidate, ...]
     protections: tuple[Protection, ...]
-    ranking_universe: tuple[Session, ...]
+    groups: tuple[GroupEvaluation, ...]
+    ranking_universe: tuple[Candidate, ...]
 
     @property
     def examined(self) -> int:
@@ -220,7 +234,7 @@ def argument_parser() -> argparse.ArgumentParser:
   apply exact plan: cleanup_sessions.py --apply-plan PLAN.json
 
 Permanent deletion cannot use --apply; it requires a saved, reviewed plan.
-Latest N ranks roots and discoverable descendants within the selected scope.
+Latest N ranks root conversations; each root plus its descendants counts once.
 """,
     )
     parser.add_argument(
@@ -233,7 +247,7 @@ Latest N ranks roots and discoverable descendants within the selected scope.
         "--keep-latest",
         type=positive_int,
         metavar="N",
-        help="protect the latest N roots/descendants in the selected scope",
+        help="retain the latest N root conversations in the selected scope",
     )
     parser.add_argument(
         "--project",
@@ -271,7 +285,12 @@ Latest N ranks roots and discoverable descendants within the selected scope.
     parser.add_argument(
         "--json",
         action="store_true",
-        help="emit the stable machine-readable plan/result structure",
+        help="emit the shared machine-readable preview structure",
+    )
+    parser.add_argument(
+        "--include-titles",
+        action="store_true",
+        help="include sanitized titles in shared JSON preview output",
     )
     parser.add_argument(
         "--check-compatibility",
@@ -298,6 +317,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         if any(value not in (None, False) for value in work_options):
             parser.error("--check-compatibility cannot be combined with cleanup options")
         return args
+
+    if args.include_titles and not args.json:
+        parser.error("--include-titles requires --json")
+    if args.json and (args.apply or args.apply_plan is not None):
+        parser.error("--json is a preview format and cannot be combined with an apply mode")
 
     if args.apply_plan is not None:
         incompatible = (
@@ -328,7 +352,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def normalize_invoking_cwd(path: str) -> str:
     if not os.path.isabs(path):
         raise CleanupError("the invoking working directory must be absolute")
-    return os.path.normcase(os.path.normpath(path))
+    physical = os.path.realpath(path)
+    return os.path.normcase(unicodedata.normalize("NFC", os.path.normpath(physical)))
 
 
 def canonical_uuid(value: Any, field: str = "session id") -> str:
@@ -434,8 +459,15 @@ def parse_thread(
 
     name = raw.get("name")
     preview = raw.get("preview")
-    title_source = name if isinstance(name, str) and name else preview
-    title = sanitize_title(title_source)
+    raw_title = name if isinstance(name, str) and name else preview
+    title = sanitize_title(raw_title)
+    title_source = (
+        "name"
+        if isinstance(name, str) and name
+        else "preview"
+        if isinstance(preview, str) and preview
+        else None
+    )
 
     return Session(
         id=session_id,
@@ -453,6 +485,7 @@ def parse_thread(
         session_id=canonical_uuid(raw.get("sessionId"), "sessionId"),
         source_kind=source_kind(raw.get("source")),
         loaded=loaded,
+        title_source=title_source,
     )
 
 
@@ -480,19 +513,78 @@ def _unsafe_reason(session: Session) -> str | None:
     return None
 
 
-def _retention_reason(
-    session: Session,
-    policy: Policy,
-    *,
-    cutoff: dt.datetime | None,
-    latest_ids: set[str],
-) -> str | None:
+REASON_ORDER = (
+    "older-than",
+    "outside-latest",
+    "invoking-session",
+    "pinned",
+    "running",
+    "possibly-running",
+    "background-session",
+    "ephemeral",
+    "unsafe-runtime-state",
+    "recently-active",
+    "within-latest",
+    "newer-than-cutoff",
+    "related-outside-scope",
+    "project-identity-unknown",
+    "project-identity-unverified",
+    "project-path-collision",
+    "metadata-malformed",
+    "ancestry-ambiguous",
+    "duplicate-session-id",
+    "unsafe-storage",
+)
+REASON_INDEX = {reason: index for index, reason in enumerate(REASON_ORDER)}
+STATUS_ORDER = {"selected": 0, "retained": 1, "protected": 2, "excluded": 3}
+
+
+def _ordered_reason_codes(reasons: Iterable[str]) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            set(reasons),
+            key=lambda reason: (REASON_INDEX.get(reason, len(REASON_INDEX)), reason),
+        )
+    )
+
+
+def _runtime_reason_codes(session: Session) -> tuple[str, ...]:
     reasons: list[str] = []
-    if cutoff is not None and session.recency_at >= cutoff:
-        reasons.append("last used at or after the age cutoff")
-    if policy.keep_latest is not None and session.id in latest_ids:
-        reasons.append(f"within the latest {policy.keep_latest} sessions")
-    return " and ".join(reasons) if reasons else None
+    if session.pinned:
+        reasons.append("pinned")
+    if session.loaded or session.status == "active":
+        reasons.append("running")
+    if session.ephemeral:
+        reasons.append("ephemeral")
+    if session.status not in SAFE_STATUSES and session.status != "active":
+        reasons.append("unsafe-runtime-state")
+    return _ordered_reason_codes(reasons)
+
+
+def _issue_reason_code(issue: UnsafeRecord) -> str:
+    reason = issue.reason.lower()
+    if "duplicate" in reason or "conflicting metadata" in reason:
+        return "duplicate-session-id"
+    if any(
+        text in reason
+        for text in (
+            "ancestry",
+            "parent",
+            "multiple roots",
+            "descendant set",
+            "cycle",
+        )
+    ):
+        return "ancestry-ambiguous"
+    return "metadata-malformed"
+
+
+def _group_activity(tree: Candidate) -> tuple[dt.datetime, str]:
+    member = min(
+        (tree.root, *tree.descendants),
+        key=lambda item: (-item.recency_at.timestamp(), item.id),
+    )
+    return member.recency_at, member.id
 
 
 def _descendant_depth(root: Session, item: Session, by_id: Mapping[str, Session]) -> int:
@@ -568,23 +660,39 @@ def build_plan(
     malformed: Iterable[UnsafeRecord] = (),
     descendant_lookup: Callable[[Session], tuple[Sequence[Session], Sequence[UnsafeRecord]]] | None = None,
 ) -> Plan:
-    """Apply retention and safety rules to roots and every cascaded descendant."""
+    """Evaluate retention once per root conversation and its descendants."""
     if policy.older_than is None and policy.keep_latest is None:
         raise CleanupError("at least one retention selector is required")
     if now.tzinfo is None:
         raise CleanupError("the planning clock must be timezone-aware")
 
     current_cwd = normalize_invoking_cwd(policy.current_cwd)
-    scoped = [item for item in sessions if policy.project == "all" or item.cwd == current_cwd]
-    scoped.sort(key=_session_sort_key)
+    scoped_input = [
+        item
+        for item in sessions
+        if policy.project == "all" or item.cwd == current_cwd
+    ]
+    scoped_input.sort(key=_session_sort_key)
+    scoped_by_id: dict[str, Session] = {}
+    duplicate_roots: set[str] = set()
+    for item in scoped_input:
+        previous = scoped_by_id.get(item.id)
+        if previous is not None:
+            duplicate_roots.add(item.id)
+            continue
+        scoped_by_id[item.id] = item
+    scoped = list(scoped_by_id.values())
     malformed_items = tuple(malformed)
     malformed_ids = {item.id for item in malformed_items if item.id is not None}
 
     trees: list[Candidate] = []
     tree_issues: dict[str, list[UnsafeRecord]] = {root.id: [] for root in scoped}
-    descendant_owners: dict[str, list[str]] = {}
-    ranking_by_id: dict[str, Session] = {root.id: root for root in scoped}
+    descendant_owners: dict[str, list[str]] = {
+        root.id: [root.id] for root in scoped
+    }
     for root in scoped:
+        if root.id in duplicate_roots:
+            tree_issues[root.id].append(UnsafeRecord(root.id, "duplicate root id"))
         descendants: Sequence[Session] = ()
         issues: Sequence[UnsafeRecord] = ()
         if descendant_lookup is not None:
@@ -595,13 +703,19 @@ def build_plan(
         trees.append(Candidate(root, ordered))
         for item in ordered:
             descendant_owners.setdefault(item.id, []).append(root.id)
-            existing = ranking_by_id.get(item.id)
+            existing = next(
+                (
+                    known
+                    for known_tree in trees[:-1]
+                    for known in (known_tree.root, *known_tree.descendants)
+                    if known.id == item.id
+                ),
+                None,
+            )
             if existing is not None and existing != item:
                 tree_issues[root.id].append(
                     UnsafeRecord(item.id, "session appeared with conflicting metadata")
                 )
-            else:
-                ranking_by_id[item.id] = item
 
     for descendant_id, owners in descendant_owners.items():
         if len(set(owners)) > 1:
@@ -610,107 +724,161 @@ def build_plan(
                     UnsafeRecord(descendant_id, "descendant appeared under multiple roots")
                 )
 
-    ranking_universe = sorted(
-        (
-            item
-            for item in ranking_by_id.values()
-            if policy.project == "all" or item.cwd == current_cwd
-        ),
-        key=_session_sort_key,
-    )
-    latest_ids = (
-        {item.id for item in ranking_universe[: policy.keep_latest]}
-        if policy.keep_latest is not None
-        else set()
-    )
+    for item in malformed_items:
+        if item.id is None:
+            continue
+        for tree in trees:
+            if item.id in {member.id for member in (tree.root, *tree.descendants)}:
+                tree_issues[tree.root.id].append(item)
+
     cutoff = effective_cutoff(policy, now)
-    fixed_policy = dataclasses.replace(policy, cutoff=cutoff)
+    fixed_policy = dataclasses.replace(
+        policy,
+        cutoff=cutoff,
+        current_cwd=current_cwd,
+    )
+
+    exclusions: dict[str, tuple[str, ...]] = {}
+    activities: dict[str, tuple[dt.datetime, str]] = {}
+    for tree in trees:
+        activities[tree.root.id] = _group_activity(tree)
+        reasons: list[str] = []
+        if tree.root.id in malformed_ids:
+            reasons.append("metadata-malformed")
+        reasons.extend(_issue_reason_code(issue) for issue in tree_issues[tree.root.id])
+        if fixed_policy.project == "current" and any(
+            item.cwd != current_cwd for item in tree.descendants
+        ):
+            reasons.append("related-outside-scope")
+        if reasons:
+            exclusions[tree.root.id] = _ordered_reason_codes(reasons)
+
+    ranking_universe = sorted(
+        (tree for tree in trees if tree.root.id not in exclusions),
+        key=lambda tree: (-activities[tree.root.id][0].timestamp(), tree.root.id),
+    )
+    ranks = {
+        tree.root.id: rank
+        for rank, tree in enumerate(ranking_universe, start=1)
+    }
 
     protected_recent: list[Session] = []
     protected_pinned: list[Session] = []
-    protected_unsafe: list[UnsafeRecord] = list(malformed_items)
-    protections: list[Protection] = [
-        Protection("malformed", item.reason, item.id, item.id)
-        for item in malformed_items
-    ]
-    candidates: list[Candidate] = []
+    protected_unsafe: list[UnsafeRecord] = []
+    protections: list[Protection] = []
+    groups: list[GroupEvaluation] = []
     for tree in trees:
         root = tree.root
-        if root.id in malformed_ids:
-            continue
-        unsafe_reason = _unsafe_reason(root)
-        if unsafe_reason is not None:
-            category = "pinned" if root.pinned else "unsafe"
-            protections.append(
-                Protection(category, unsafe_reason, root.id, root.id, session=root)
-            )
-            if root.pinned:
-                protected_pinned.append(root)
+        activity, activity_session_id = activities[root.id]
+        issues = tuple(tree_issues[root.id])
+        exclusion_reasons = exclusions.get(root.id, ())
+        rank = ranks.get(root.id)
+
+        retention_reasons: list[str] = []
+        selection_reasons: list[str] = []
+        if cutoff is not None:
+            if activity < cutoff:
+                selection_reasons.append("older-than")
             else:
-                protected_unsafe.append(UnsafeRecord(root.id, unsafe_reason))
-            continue
+                retention_reasons.append("newer-than-cutoff")
+        if fixed_policy.keep_latest is not None:
+            assert rank is not None or exclusion_reasons
+            if rank is not None and rank <= fixed_policy.keep_latest:
+                retention_reasons.append("within-latest")
+            elif rank is not None:
+                selection_reasons.append("outside-latest")
 
-        retention_reason = _retention_reason(
-            root, fixed_policy, cutoff=cutoff, latest_ids=latest_ids
+        members = (root, *tree.descendants)
+        protection_reasons = _ordered_reason_codes(
+            reason
+            for member in members
+            for reason in _runtime_reason_codes(member)
         )
-        if retention_reason is not None:
-            protected_recent.append(root)
-            protections.append(
-                Protection("retention", retention_reason, root.id, root.id, session=root)
+
+        if exclusion_reasons:
+            status = "excluded"
+            reasons = exclusion_reasons
+        elif protection_reasons:
+            status = "protected"
+            reasons = _ordered_reason_codes(
+                (*protection_reasons, *retention_reasons)
             )
+        elif retention_reasons:
+            status = "retained"
+            reasons = _ordered_reason_codes(retention_reasons)
+        else:
+            status = "selected"
+            reasons = _ordered_reason_codes(selection_reasons)
+
+        group = GroupEvaluation(
+            tree=tree,
+            status=status,
+            reasons=reasons,
+            rank=rank,
+            activity=activity,
+            activity_session_id=activity_session_id,
+            issues=issues,
+        )
+        groups.append(group)
+
+        if status == "selected":
             continue
 
-        issues = tree_issues[root.id]
-        if issues:
-            detail = "; ".join(item.reason for item in issues[:3])
-            reason = f"descendant metadata or ancestry is unsafe: {detail}"
-            protected_unsafe.append(UnsafeRecord(root.id, reason))
-            protections.append(
-                Protection("malformed-descendant", reason, root.id, root.id, session=root)
-            )
-            continue
-
-        blocker: Session | None = None
-        blocker_category = ""
-        blocker_reason = ""
-        for descendant in tree.descendants:
-            if fixed_policy.project == "current" and descendant.cwd != current_cwd:
-                blocker = descendant
-                blocker_category = "project-boundary"
-                blocker_reason = "descendant is outside the exact current-project cwd"
-                break
-            unsafe_reason = _unsafe_reason(descendant)
-            if unsafe_reason is not None:
-                blocker = descendant
-                blocker_category = "pinned-descendant" if descendant.pinned else "unsafe-descendant"
-                blocker_reason = unsafe_reason
-                break
-            retention_reason = _retention_reason(
-                descendant, fixed_policy, cutoff=cutoff, latest_ids=latest_ids
-            )
-            if retention_reason is not None:
-                blocker = descendant
-                blocker_category = "descendant-retention"
-                blocker_reason = retention_reason
-                break
-
-        if blocker is not None:
-            reason = f"descendant {short_id(blocker.id)} blocks cascade: {blocker_reason}"
-            protected_unsafe.append(UnsafeRecord(root.id, reason))
-            if blocker_category == "descendant-retention":
-                protected_recent.append(root)
-            protections.append(
-                Protection(
-                    blocker_category,
-                    blocker_reason,
-                    root.id,
-                    root.id,
-                    session=root,
-                    blocker=blocker,
+        blocker = next(
+            (
+                member
+                for member in members
+                if _runtime_reason_codes(member)
+                or member.id in {issue.id for issue in issues}
+                or (
+                    fixed_policy.project == "current"
+                    and member.cwd != current_cwd
                 )
+            ),
+            None,
+        )
+        reason_text = ", ".join(reasons)
+        protections.append(
+            Protection(
+                reasons[0],
+                reason_text,
+                root.id,
+                root.id,
+                session=root,
+                blocker=blocker if blocker is not root else None,
             )
+        )
+        if retention_reasons:
+            protected_recent.append(root)
+        if "pinned" in protection_reasons:
+            protected_pinned.append(root)
+        if status in ("protected", "excluded"):
+            protected_unsafe.append(UnsafeRecord(root.id, reason_text))
+
+    represented_ids = {
+        member.id
+        for tree in trees
+        for member in (tree.root, *tree.descendants)
+    }
+    for item in malformed_items:
+        if item.id is not None and item.id in represented_ids:
             continue
-        candidates.append(tree)
+        protections.append(
+            Protection("metadata-malformed", item.reason, item.id, item.id)
+        )
+        protected_unsafe.append(item)
+
+    groups.sort(
+        key=lambda group: (
+            STATUS_ORDER[group.status],
+            -group.activity.timestamp(),
+            group.tree.root.id,
+        )
+    )
+    candidates = sorted(
+        (group.tree for group in groups if group.status == "selected"),
+        key=lambda tree: _session_sort_key(tree.root),
+    )
 
     return Plan(
         policy=fixed_policy,
@@ -723,6 +891,7 @@ def build_plan(
         trees=tuple(trees),
         candidates=tuple(candidates),
         protections=tuple(protections),
+        groups=tuple(groups),
         ranking_universe=tuple(ranking_universe),
     )
 
@@ -1441,6 +1610,247 @@ def plan_document(
     return document
 
 
+def iso_timestamp(value: dt.datetime) -> str:
+    if value.tzinfo is None:
+        raise CleanupError("preview timestamps must be timezone-aware")
+    return value.astimezone(dt.timezone.utc).replace(microsecond=0).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _shared_session_record(
+    session: Session,
+    group: GroupEvaluation,
+    *,
+    relation: str,
+    include_titles: bool,
+) -> dict[str, Any]:
+    issue_codes = _ordered_reason_codes(
+        _issue_reason_code(issue)
+        for issue in group.issues
+        if issue.id == session.id
+    )
+    if (
+        group.status == "excluded"
+        and "related-outside-scope" in group.reasons
+        and session.cwd != group.tree.root.cwd
+    ):
+        issue_codes = _ordered_reason_codes((*issue_codes, "related-outside-scope"))
+    return {
+        "session_id": session.id,
+        "relation": relation,
+        "parent_session_id": session.parent_id,
+        "title": session.title if include_titles and session.title else None,
+        "title_source": session.title_source,
+        "project_path": session.cwd,
+        "project_identity": "verified",
+        "created_at": iso_timestamp(session.created_at),
+        "last_activity": iso_timestamp(session.recency_at),
+        "last_activity_source": "recencyAt",
+        "bytes": None,
+        "issues": [
+            {"code": code, "subject": session.id} for code in issue_codes
+        ],
+        "extensions": {
+            "codex": {
+                "session_id": session.session_id,
+                "archived": session.archived,
+                "status": session.status,
+                "active_flags": list(session.active_flags),
+                "loaded": session.loaded,
+                "ephemeral": session.ephemeral,
+                "source_kind": session.source_kind,
+            }
+        },
+    }
+
+
+def shared_preview_document(
+    plan: Plan,
+    codex_home: str,
+    *,
+    codex_version: str,
+    include_titles: bool = False,
+) -> dict[str, Any]:
+    """Render the shared draft-1 preview; never use it as mutation authority."""
+    group_counts = {
+        "examined": len(plan.groups),
+        "selected": 0,
+        "retained": 0,
+        "protected": 0,
+        "excluded": 0,
+    }
+    session_counts = {
+        "examined": sum(
+            1 + len(group.tree.descendants) for group in plan.groups
+        ),
+        "selected": 0,
+        "retained": 0,
+        "protected": 0,
+        "excluded": 0,
+    }
+    reason_counts: dict[str, dict[str, int]] = {
+        status: {} for status in ("selected", "retained", "protected", "excluded")
+    }
+    groups: list[dict[str, Any]] = []
+    for group in plan.groups:
+        group_counts[group.status] += 1
+        session_counts[group.status] += 1 + len(group.tree.descendants)
+        for reason in group.reasons:
+            reason_counts[group.status][reason] = (
+                reason_counts[group.status].get(reason, 0) + 1
+            )
+        sessions = [
+            _shared_session_record(
+                group.tree.root,
+                group,
+                relation="root",
+                include_titles=include_titles,
+            )
+        ]
+        sessions.extend(
+            _shared_session_record(
+                item,
+                group,
+                relation="descendant",
+                include_titles=include_titles,
+            )
+            for item in group.tree.descendants
+        )
+        groups.append(
+            {
+                "group_id": group.tree.root.id,
+                "status": group.status,
+                "reasons": list(group.reasons),
+                "rank": group.rank,
+                "proposed_action": (
+                    plan.policy.action if group.status == "selected" else None
+                ),
+                "last_activity": iso_timestamp(group.activity),
+                "last_activity_session_id": group.activity_session_id,
+                "bytes": None,
+                "session_count": len(sessions),
+                "sessions": sessions,
+                "mutation_blockers": [],
+                "extensions": {
+                    "codex": {"root_thread_id": group.tree.root.id}
+                },
+            }
+        )
+
+    null_counts = {
+        "examined": None,
+        "selected": None,
+        "retained": None,
+        "protected": None,
+        "excluded": None,
+    }
+    cutoff = effective_cutoff(plan.policy, plan.now)
+    return {
+        "schema": "session-cleanup/preview",
+        "schema_version": 1,
+        "agent": "codex",
+        "agent_version": sanitize_title(codex_version, limit=120) or None,
+        "tool": {"name": "codex-session-cleanup", "version": TOOL_VERSION},
+        "mode": "preview",
+        "changes_made": False,
+        "evaluated_at": iso_timestamp(plan.now),
+        "scope": {
+            "mode": plan.policy.project,
+            "path": plan.policy.current_cwd if plan.policy.project == "current" else None,
+        },
+        "policy": {
+            "older_than_seconds": (
+                int(plan.policy.older_than.total_seconds())
+                if plan.policy.older_than is not None
+                else None
+            ),
+            "cutoff": iso_timestamp(cutoff) if cutoff is not None else None,
+            "keep_latest": plan.policy.keep_latest,
+            "min_idle_seconds": None,
+            "combination": "intersection",
+            "ranking_unit": "root-group",
+            "requested_action": plan.policy.action,
+        },
+        "activity_timestamp": {
+            "source": "codex-app-server:recencyAt",
+            "kind": "agent-reported",
+            "resolution": "1 second",
+            "conservative": False,
+        },
+        "capabilities": {
+            "actions": {
+                "archive": {
+                    "supported": True,
+                    "reversibility": "agent-native",
+                    "requires_saved_plan": False,
+                    "unsupported_reason": None,
+                },
+                "quarantine": {
+                    "supported": False,
+                    "reversibility": "tool-managed",
+                    "requires_saved_plan": False,
+                    "unsupported_reason": "not-offered-by-backend",
+                },
+                "delete": {
+                    "supported": True,
+                    "reversibility": "irreversible",
+                    "requires_saved_plan": True,
+                    "unsupported_reason": None,
+                },
+            },
+            "sizes": False,
+            "titles": True,
+            "pinning": True,
+            "active_session_detection": "agent-reported",
+        },
+        "totals": {
+            "groups": group_counts,
+            "sessions": session_counts,
+            "bytes": null_counts,
+            "reasons": reason_counts,
+        },
+        "groups": groups,
+        "warnings": [
+            {
+                "code": "state-db-only-discovery",
+                "subject": None,
+            },
+            {
+                "code": "standalone-app-server-load-visibility",
+                "subject": None,
+            },
+            {
+                "code": "non-atomic-native-mutation",
+                "subject": None,
+            },
+            *(
+                {
+                    "code": "metadata-malformed",
+                    "subject": item.id,
+                }
+                for item in plan.malformed
+                if item.id
+                not in {
+                    member.id
+                    for group in plan.groups
+                    for member in (group.tree.root, *group.tree.descendants)
+                }
+            ),
+        ],
+        "extensions": {
+            "codex": {
+                "codex_home": normalize_invoking_cwd(codex_home),
+                "discovery_mode": "state-db-only",
+                "use_state_db_only": True,
+                "archived_scope": (
+                    "active-and-archived" if plan.policy.action == "delete" else "active"
+                ),
+            }
+        },
+    }
+
+
 def document_integrity(document: Mapping[str, Any]) -> str:
     unsigned = {key: value for key, value in document.items() if key != "integrity"}
     canonical = json.dumps(
@@ -1454,6 +1864,138 @@ def document_integrity(document: Mapping[str, Any]) -> str:
 
 def render_plan_json(document: Mapping[str, Any]) -> str:
     return json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False)
+
+
+def _parse_iso_timestamp(value: Any, field: str) -> dt.datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise CleanupError(f"{field} is not a UTC preview timestamp")
+    try:
+        parsed = dt.datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise CleanupError(f"{field} is malformed") from exc
+    return parsed
+
+
+def render_shared_preview(
+    document: Mapping[str, Any], *, details: bool = False, applying: bool = False
+) -> str:
+    policy = document.get("policy", {})
+    scope = document.get("scope", {})
+    totals = document.get("totals", {})
+    evaluated_at = _parse_iso_timestamp(document.get("evaluated_at"), "evaluated_at")
+    action = policy.get("requested_action") if isinstance(policy, Mapping) else None
+    lines = [
+        "Codex session cleanup apply check" if applying else "Codex session cleanup preview",
+        "",
+        "Policy:",
+        f"  project: {scope.get('mode') if isinstance(scope, Mapping) else 'unknown'}",
+        f"  exact cwd: {scope.get('path') if isinstance(scope, Mapping) and scope.get('path') else 'all projects'}",
+        f"  older than: {format_duration(dt.timedelta(seconds=policy['older_than_seconds']) if isinstance(policy, Mapping) and isinstance(policy.get('older_than_seconds'), int) else None)}",
+        f"  cutoff: {policy.get('cutoff') if isinstance(policy, Mapping) and policy.get('cutoff') else 'not set'}",
+        f"  keep latest conversations: {policy.get('keep_latest') if isinstance(policy, Mapping) and policy.get('keep_latest') is not None else 'not set'}",
+        f"  action: {action}",
+        "  ranking unit: root conversation (root plus descendants)",
+    ]
+    group_totals = totals.get("groups", {}) if isinstance(totals, Mapping) else {}
+    session_totals = totals.get("sessions", {}) if isinstance(totals, Mapping) else {}
+    lines.extend(
+        [
+            "",
+            f"Groups examined: {group_totals.get('examined', 0)}",
+            f"Selected: {group_totals.get('selected', 0)}",
+            f"Retained: {group_totals.get('retained', 0)}",
+            f"Protected: {group_totals.get('protected', 0)}",
+            f"Excluded: {group_totals.get('excluded', 0)}",
+            f"Sessions represented: {session_totals.get('examined', 0)}",
+        ]
+    )
+    if action == "delete":
+        lines.extend(
+            [
+                "",
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+                "WARNING: PERMANENT DELETION IS IRREVERSIBLE.",
+                "Deletion requires saving and then applying a reviewed plan.",
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+            ]
+        )
+
+    groups = document.get("groups", [])
+    for status in ("selected", "retained", "protected", "excluded"):
+        status_groups = [
+            group
+            for group in groups
+            if isinstance(group, Mapping) and group.get("status") == status
+        ] if isinstance(groups, list) else []
+        lines.extend(["", f"{status.capitalize()} conversations:"])
+        if not status_groups:
+            lines.append("  (none)")
+            continue
+        for group in status_groups:
+            group_id = group.get("group_id")
+            identifier = (
+                group_id
+                if details and isinstance(group_id, str)
+                else short_id(group_id)
+                if isinstance(group_id, str)
+                else "unknown"
+            )
+            rank = group.get("rank")
+            reasons = ", ".join(group.get("reasons", []))
+            lines.append(
+                f"  {identifier} rank={rank if rank is not None else '-'} "
+                f"last-used={group.get('last_activity')} reasons={reasons}"
+            )
+            sessions = group.get("sessions", [])
+            if not isinstance(sessions, list):
+                continue
+            for member in sessions:
+                if not isinstance(member, Mapping):
+                    continue
+                session_id = member.get("session_id")
+                member_id = (
+                    session_id
+                    if details and isinstance(session_id, str)
+                    else short_id(session_id)
+                    if isinstance(session_id, str)
+                    else "unknown"
+                )
+                activity = _parse_iso_timestamp(
+                    member.get("last_activity"), "last_activity"
+                )
+                title = sanitize_title(member.get("title"), limit=120) or "(untitled)"
+                lines.append(
+                    f"    {member.get('relation', 'member'):<10} "
+                    f"{member_id:<36} {format_age(evaluated_at, activity):<6} "
+                    f"{title}"
+                )
+                lines.append(f"               project: {member.get('project_path')}")
+                parent = member.get("parent_session_id")
+                if isinstance(parent, str):
+                    lines.append(
+                        "               parent: "
+                        + (parent if details else short_id(parent))
+                    )
+                if details:
+                    extension = member.get("extensions", {})
+                    codex = extension.get("codex", {}) if isinstance(extension, Mapping) else {}
+                    lines.append(
+                        "               "
+                        f"archived={codex.get('archived')} status={codex.get('status')} "
+                        f"loaded={codex.get('loaded')} ephemeral={codex.get('ephemeral')} "
+                        f"source={codex.get('source_kind')}"
+                    )
+    lines.extend(
+        [
+            "",
+            (
+                "State will be refreshed again before every root mutation."
+                if applying
+                else "No changes made."
+            ),
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _record_identifier(record: Mapping[str, Any], *, details: bool) -> str:
@@ -2282,23 +2824,36 @@ def _run_policy(
             raise ProtocolError("app-server did not resolve Codex home")
         discovery = SessionDiscovery(client, capabilities)
         plan = discover_plan(discovery, policy, now=dt.datetime.now(dt.timezone.utc))
+        codex_version = installed_codex_version(codex_bin)
         document_state = "ready" if args.save_plan is not None else "preview"
-        document = plan_document(
+        manifest = plan_document(
             plan,
             client.codex_home,
-            codex_version=installed_codex_version(codex_bin),
+            codex_version=codex_version,
             state=document_state,
+        )
+        preview = shared_preview_document(
+            plan,
+            client.codex_home,
+            codex_version=codex_version,
+            include_titles=args.include_titles,
         )
         saved_path: Path | None = None
         if args.save_plan is not None:
             require_manifest_outside_codex_home(args.save_plan, client.codex_home)
-            saved_path = save_plan_manifest(args.save_plan, document)
+            saved_path = save_plan_manifest(args.save_plan, manifest)
 
         if not args.apply:
             if args.json:
-                print(render_plan_json(document))
+                print(render_plan_json(preview))
             else:
-                print(render_plan(document, details=args.details))
+                human_preview = shared_preview_document(
+                    plan,
+                    client.codex_home,
+                    codex_version=codex_version,
+                    include_titles=True,
+                )
+                print(render_shared_preview(human_preview, details=args.details))
                 if saved_path is not None:
                     safe_path = sanitize_title(str(saved_path), limit=500)
                     print(f"\nSaved reviewable plan: {safe_path}")
@@ -2309,13 +2864,15 @@ def _run_policy(
                     )
             return 0
 
-        if not args.json:
-            print(render_plan(document, details=args.details, applying=True))
+        human_preview = shared_preview_document(
+            plan,
+            client.codex_home,
+            codex_version=codex_version,
+            include_titles=True,
+        )
+        print(render_shared_preview(human_preview, details=args.details, applying=True))
         if not plan.candidates:
-            if args.json:
-                print(render_plan_json(document))
-            else:
-                print("\nNo matching sessions. No changes made.")
+            print("\nNo matching sessions. No changes made.")
             return 0
 
         with CleanupLock(client.codex_home):
@@ -2341,14 +2898,7 @@ def _run_policy(
                 revalidate=revalidate,
             )
 
-    if args.json:
-        output = dict(document)
-        output["changesMade"] = bool(report.successful)
-        output["application"] = mutation_report_record(report, plan.policy.action)
-        output["integrity"] = document_integrity(output)
-        print(render_plan_json(output))
-    else:
-        print("\n" + render_mutation_report(report, plan.policy.action))
+    print("\n" + render_mutation_report(report, plan.policy.action))
     return EXIT_ERROR if report.failed or report.skipped else 0
 
 
@@ -2368,7 +2918,8 @@ def _run_saved_plan(
                 raise ManifestError(
                     "plan belongs to a different Codex home; generate a fresh preview"
                 )
-            if saved.codex_version != installed_codex_version(codex_bin):
+            codex_version = installed_codex_version(codex_bin)
+            if saved.codex_version != codex_version:
                 raise ManifestError(
                     "installed Codex version differs from the saved plan; "
                     "generate a fresh preview"
@@ -2397,14 +2948,18 @@ def _run_saved_plan(
                 )
                 raise
 
-            if not args.json:
-                print(
-                    render_plan(
-                        saved.document,
-                        details=args.details,
-                        applying=True,
-                    )
+            print(
+                render_shared_preview(
+                    shared_preview_document(
+                        current,
+                        client.codex_home,
+                        codex_version=codex_version,
+                        include_titles=True,
+                    ),
+                    details=args.details,
+                    applying=True,
                 )
+            )
 
             saved = update_plan_manifest(
                 saved,
@@ -2441,11 +2996,8 @@ def _run_saved_plan(
                 ),
             )
 
-    if args.json:
-        print(render_plan_json(saved.document))
-    else:
-        print("\n" + render_mutation_report(report, saved.policy.action))
-        print(f"Plan state: {saved.document['state']}")
+    print("\n" + render_mutation_report(report, saved.policy.action))
+    print(f"Plan state: {saved.document['state']}")
     return EXIT_ERROR if report.failed or report.skipped else 0
 
 

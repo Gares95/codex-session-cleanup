@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -64,6 +65,7 @@ def make_session(
         session_id=session_id(number),
         source_kind=source_kind,
         loaded=loaded,
+        title_source="preview",
     )
 
 
@@ -150,6 +152,83 @@ def plan_document(plan: cleanup.Plan) -> dict[str, object]:
     )
 
 
+def validate_json_schema(
+    value: object,
+    schema: dict[str, object],
+    root: dict[str, object],
+    path: str = "$",
+) -> None:
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        if not reference.startswith("#/"):
+            raise AssertionError(f"{path}: unsupported schema reference {reference}")
+        target: object = root
+        for component in reference[2:].split("/"):
+            if not isinstance(target, dict) or component not in target:
+                raise AssertionError(f"{path}: unresolved schema reference {reference}")
+            target = target[component]
+        if not isinstance(target, dict):
+            raise AssertionError(f"{path}: schema reference is not an object")
+        validate_json_schema(value, target, root, path)
+
+    if "const" in schema and value != schema["const"]:
+        raise AssertionError(f"{path}: expected constant {schema['const']!r}")
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        raise AssertionError(f"{path}: value {value!r} is not in {enum!r}")
+
+    expected_types = schema.get("type")
+    if isinstance(expected_types, str):
+        expected_types = [expected_types]
+    if isinstance(expected_types, list):
+        matches = {
+            "null": value is None,
+            "object": isinstance(value, dict),
+            "array": isinstance(value, list),
+            "string": isinstance(value, str),
+            "integer": isinstance(value, int) and not isinstance(value, bool),
+            "boolean": isinstance(value, bool),
+        }
+        if not any(matches.get(item, False) for item in expected_types):
+            raise AssertionError(f"{path}: expected type {expected_types}, got {type(value).__name__}")
+
+    minimum = schema.get("minimum")
+    if isinstance(minimum, int) and isinstance(value, int) and value < minimum:
+        raise AssertionError(f"{path}: {value} is below minimum {minimum}")
+    pattern = schema.get("pattern")
+    if isinstance(pattern, str) and isinstance(value, str) and re.fullmatch(pattern, value) is None:
+        raise AssertionError(f"{path}: {value!r} does not match {pattern!r}")
+
+    if isinstance(value, list):
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            raise AssertionError(f"{path}: array has fewer than {min_items} items")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                validate_json_schema(item, item_schema, root, f"{path}[{index}]")
+
+    if isinstance(value, dict):
+        required = schema.get("required", [])
+        if isinstance(required, list):
+            missing = set(required) - set(value)
+            if missing:
+                raise AssertionError(f"{path}: missing required fields {sorted(missing)}")
+        properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            properties = {}
+        for key, child in value.items():
+            child_schema = properties.get(key)
+            if isinstance(child_schema, dict):
+                validate_json_schema(child, child_schema, root, f"{path}.{key}")
+                continue
+            additional = schema.get("additionalProperties", True)
+            if additional is False:
+                raise AssertionError(f"{path}: unexpected field {key!r}")
+            if isinstance(additional, dict):
+                validate_json_schema(child, additional, root, f"{path}.{key}")
+
+
 class ContractIntegrityTests(unittest.TestCase):
     def test_vendored_contract_matches_sha256sums(self) -> None:
         contract_dir = ROOT / "contract"
@@ -175,6 +254,191 @@ class ContractIntegrityTests(unittest.TestCase):
             if path.is_file() and path.name != "SHA256SUMS"
         }
         self.assertEqual(listed, present)
+
+
+class ContractConformanceTests(unittest.TestCase):
+    def _fixture_plan(
+        self, fixture: dict[str, object]
+    ) -> tuple[cleanup.Plan, dict[str, str]]:
+        evaluated_at = dt.datetime.fromisoformat(
+            str(fixture["evaluated_at"]).replace("Z", "+00:00")
+        )
+        raw_sessions = fixture["sessions"]
+        assert isinstance(raw_sessions, list)
+        labels = sorted(str(item["id"]) for item in raw_sessions)
+        ids = {
+            label: f"11111111-1111-4111-8111-{index:012d}"
+            for index, label in enumerate(labels, start=1)
+        }
+        sessions: dict[str, cleanup.Session] = {}
+        malformed: list[cleanup.UnsafeRecord] = []
+        for raw in raw_sessions:
+            assert isinstance(raw, dict)
+            label = str(raw["id"])
+            parent = raw.get("parent")
+            recency = evaluated_at - dt.timedelta(hours=int(raw["hours_ago"]))
+            state = str(raw["state"])
+            item = cleanup.Session(
+                id=ids[label],
+                title=f"Contract fixture {label}",
+                created_at=recency - dt.timedelta(hours=1),
+                updated_at=recency,
+                recency_at=recency,
+                cwd=str(raw["project"]),
+                pinned=state == "pinned",
+                ephemeral=state == "ephemeral",
+                status="active" if state == "running" else "idle",
+                active_flags=("processing",) if state == "running" else (),
+                archived=False,
+                parent_id=ids[str(parent)] if parent is not None else None,
+                session_id=ids[label],
+                source_kind="cli" if parent is None else "subAgent",
+                loaded=state == "loaded",
+                title_source="preview",
+            )
+            sessions[label] = item
+            if raw["metadata"] == "malformed" and parent is None:
+                malformed.append(
+                    cleanup.UnsafeRecord(item.id, "fixture metadata is malformed")
+                )
+
+        children: dict[str, list[str]] = {}
+        for raw in raw_sessions:
+            assert isinstance(raw, dict)
+            parent = raw.get("parent")
+            if parent is not None:
+                children.setdefault(str(parent), []).append(str(raw["id"]))
+
+        def descendants(
+            root: cleanup.Session,
+        ) -> tuple[list[cleanup.Session], list[cleanup.UnsafeRecord]]:
+            root_label = next(label for label, value in ids.items() if value == root.id)
+            found: list[cleanup.Session] = []
+            issues: list[cleanup.UnsafeRecord] = []
+            pending = list(children.get(root_label, []))
+            while pending:
+                label = pending.pop(0)
+                item = sessions[label]
+                found.append(item)
+                raw = next(
+                    entry
+                    for entry in raw_sessions
+                    if isinstance(entry, dict) and entry["id"] == label
+                )
+                if raw["metadata"] == "malformed":
+                    issues.append(
+                        cleanup.UnsafeRecord(item.id, "fixture metadata is malformed")
+                    )
+                pending.extend(children.get(label, []))
+            return found, issues
+
+        scope = fixture["scope"]
+        policy_data = fixture["policy"]
+        assert isinstance(scope, dict) and isinstance(policy_data, dict)
+        older_hours = policy_data["older_than_hours"]
+        policy = cleanup.Policy(
+            dt.timedelta(hours=int(older_hours)) if older_hours is not None else None,
+            policy_data["keep_latest"],
+            str(scope["mode"]),
+            "archive",
+            str(scope["path"] or "/work/repo"),
+        )
+        roots = [item for item in sessions.values() if item.parent_id is None]
+        return (
+            cleanup.build_plan(
+                roots,
+                policy,
+                now=evaluated_at,
+                malformed=malformed,
+                descendant_lookup=descendants,
+            ),
+            ids,
+        )
+
+    def test_all_shared_fixtures_match_status_rank_and_reasons(self) -> None:
+        fixture_paths = sorted((ROOT / "contract" / "fixtures").glob("*.json"))
+        self.assertEqual(15, len(fixture_paths))
+        for fixture_path in fixture_paths:
+            with self.subTest(fixture=fixture_path.name):
+                fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+                plan, ids = self._fixture_plan(fixture)
+                actual = {group.tree.root.id: group for group in plan.groups}
+                self.assertEqual(
+                    {group.tree.root.id for group in plan.groups if group.status == "selected"},
+                    {candidate.root.id for candidate in plan.candidates},
+                )
+                self.assertTrue(
+                    all(
+                        group.rank is None
+                        if group.status == "excluded"
+                        else isinstance(group.rank, int)
+                        for group in plan.groups
+                    )
+                )
+                expected_records = fixture["expected"]
+                self.assertEqual(len(expected_records), len(actual))
+                for expected in expected_records:
+                    group = actual[ids[expected["group"]]]
+                    self.assertEqual(expected["status"], group.status)
+                    self.assertEqual(expected["rank"], group.rank)
+                    self.assertTrue(
+                        set(expected["reasons_include"]).issubset(group.reasons),
+                        (fixture_path.name, expected, group),
+                    )
+
+    def test_shared_preview_validates_and_titles_are_opt_in(self) -> None:
+        fixture = json.loads(
+            (ROOT / "contract" / "fixtures" / "08-latest-n-counts-groups.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        plan, _ = self._fixture_plan(fixture)
+        schema = json.loads(
+            (ROOT / "contract" / "preview-v1.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        without_titles = cleanup.shared_preview_document(
+            plan,
+            "/tmp/fictional-codex-home",
+            codex_version="codex-cli 0.test",
+        )
+        validate_json_schema(without_titles, schema, schema)
+        self.assertTrue(
+            all(
+                session["title"] is None
+                for group in without_titles["groups"]
+                for session in group["sessions"]
+            )
+        )
+        with_titles = cleanup.shared_preview_document(
+            plan,
+            "/tmp/fictional-codex-home",
+            codex_version="codex-cli 0.test",
+            include_titles=True,
+        )
+        validate_json_schema(with_titles, schema, schema)
+        self.assertTrue(
+            all(
+                session["title"]
+                for group in with_titles["groups"]
+                for session in group["sessions"]
+            )
+        )
+        self.assertEqual(
+            [group["group_id"] for group in without_titles["groups"]],
+            [group["group_id"] for group in with_titles["groups"]],
+        )
+        self.assertEqual(
+            cleanup.render_plan_json(without_titles),
+            cleanup.render_plan_json(
+                cleanup.shared_preview_document(
+                    plan,
+                    "/tmp/fictional-codex-home",
+                    codex_version="codex-cli 0.test",
+                )
+            ),
+        )
 
 
 class RetentionPolicyTests(unittest.TestCase):
@@ -636,12 +900,10 @@ class DescendantSafetyTests(unittest.TestCase):
             descendant_lookup=lambda _: ([descendant], []),
         )
         self.assertFalse(plan.candidates)
-        protection = next(
-            item for item in plan.protections
-            if item.category == "descendant-retention"
-        )
-        self.assertEqual(descendant, protection.blocker)
-        self.assertIn("age cutoff", protection.reason)
+        group = plan.groups[0]
+        self.assertEqual("retained", group.status)
+        self.assertEqual(("newer-than-cutoff",), group.reasons)
+        self.assertEqual(descendant.id, group.activity_session_id)
 
     def test_descendant_in_latest_n_protects_old_root(self) -> None:
         root = make_session(1, age_days=45)
@@ -658,11 +920,10 @@ class DescendantSafetyTests(unittest.TestCase):
             descendant_lookup=descendants,
         )
         self.assertFalse(any(item.root.id == root.id for item in plan.candidates))
-        protection = next(
-            item for item in plan.protections
-            if item.target_id == root.id and item.blocker is not None
-        )
-        self.assertIn("latest 2", protection.reason)
+        group = next(item for item in plan.groups if item.tree.root.id == root.id)
+        self.assertEqual("retained", group.status)
+        self.assertEqual(2, group.rank)
+        self.assertIn("within-latest", group.reasons)
 
     def test_combined_rules_protect_latest_descendant_even_when_old(self) -> None:
         root = make_session(1, age_days=45)
@@ -678,7 +939,8 @@ class DescendantSafetyTests(unittest.TestCase):
             descendant_lookup=lambda _: ([descendant], []),
         )
         self.assertFalse(plan.candidates)
-        self.assertIn("latest 1", plan.protections[0].reason)
+        self.assertEqual("retained", plan.groups[0].status)
+        self.assertIn("within-latest", plan.groups[0].reasons)
 
     def test_nested_recent_descendant_blocks_root(self) -> None:
         root = make_session(1, age_days=45)
@@ -691,7 +953,8 @@ class DescendantSafetyTests(unittest.TestCase):
             descendant_lookup=lambda _: ([grandchild, child], []),
         )
         self.assertFalse(plan.candidates)
-        self.assertEqual(grandchild.id, plan.protections[0].blocker.id)
+        self.assertEqual(grandchild.id, plan.groups[0].activity_session_id)
+        self.assertEqual("retained", plan.groups[0].status)
         self.assertEqual((child, grandchild), plan.trees[0].descendants)
 
     def test_malformed_nested_ancestry_blocks_root(self) -> None:
@@ -704,8 +967,11 @@ class DescendantSafetyTests(unittest.TestCase):
             descendant_lookup=lambda _: ([descendant], []),
         )
         self.assertFalse(plan.candidates)
-        self.assertEqual("malformed-descendant", plan.protections[0].category)
-        self.assertIn("parent is absent", plan.protections[0].reason)
+        self.assertEqual("excluded", plan.groups[0].status)
+        self.assertIn("ancestry-ambiguous", plan.groups[0].reasons)
+        self.assertTrue(
+            any("parent is absent" in issue.reason for issue in plan.groups[0].issues)
+        )
 
     def test_mixed_archive_state_descendants_are_retention_checked_for_delete(self) -> None:
         root = make_session(1, age_days=45)
@@ -730,7 +996,8 @@ class DescendantSafetyTests(unittest.TestCase):
             descendant_lookup=lambda _: ([descendant], []),
         )
         self.assertFalse(plan.candidates)
-        self.assertIn("loaded", plan.protections[0].reason)
+        self.assertEqual("protected", plan.groups[0].status)
+        self.assertIn("running", plan.groups[0].reasons)
 
     def test_descendant_cascade_is_reported(self) -> None:
         root = make_session(1, age_days=30)
@@ -762,7 +1029,8 @@ class DescendantSafetyTests(unittest.TestCase):
             descendant_lookup=lambda _: ([descendant], []),
         )
         self.assertFalse(plan.candidates)
-        self.assertEqual("pinned-descendant", plan.protections[0].category)
+        self.assertEqual("protected", plan.groups[0].status)
+        self.assertIn("pinned", plan.groups[0].reasons)
 
     def test_active_descendant_blocks_root(self) -> None:
         root = make_session(1, age_days=30)
@@ -774,7 +1042,8 @@ class DescendantSafetyTests(unittest.TestCase):
             descendant_lookup=lambda _: ([descendant], []),
         )
         self.assertFalse(plan.candidates)
-        self.assertEqual("unsafe-descendant", plan.protections[0].category)
+        self.assertEqual("protected", plan.groups[0].status)
+        self.assertIn("running", plan.groups[0].reasons)
 
     def test_outside_project_descendant_blocks_root(self) -> None:
         root = make_session(1, age_days=30)
@@ -788,7 +1057,9 @@ class DescendantSafetyTests(unittest.TestCase):
             descendant_lookup=lambda _: ([descendant], []),
         )
         self.assertFalse(plan.candidates)
-        self.assertEqual("project-boundary", plan.protections[0].category)
+        self.assertEqual("excluded", plan.groups[0].status)
+        self.assertIsNone(plan.groups[0].rank)
+        self.assertIn("related-outside-scope", plan.groups[0].reasons)
 
     def test_unknown_descendant_impact_blocks_root(self) -> None:
         root = make_session(1, age_days=30)
@@ -800,7 +1071,8 @@ class DescendantSafetyTests(unittest.TestCase):
             descendant_lookup=lambda _: ([], [issue]),
         )
         self.assertFalse(plan.candidates)
-        self.assertIn("descendant metadata", plan.protected_unsafe[0].reason)
+        self.assertEqual("excluded", plan.groups[0].status)
+        self.assertIn("metadata-malformed", plan.groups[0].reasons)
 
 
 class ApplySafetyTests(unittest.TestCase):
@@ -1031,17 +1303,29 @@ class ManifestAndRenderingTests(unittest.TestCase):
                 with self.assertRaises(cleanup.StaleStateError):
                     cleanup.require_candidate_match(original, current)
 
-    def test_json_text_and_manifest_share_candidate_representation(self) -> None:
+    def test_preview_json_and_saved_manifest_are_separate_representations(self) -> None:
         plan = self.make_delete_plan()
-        document = cleanup.plan_document(
+        manifest = cleanup.plan_document(
             plan,
             "/tmp/fictional-codex-home",
             codex_version="codex-cli 0.test",
             state="ready",
         )
-        parsed = json.loads(cleanup.render_plan_json(document))
-        rendered = cleanup.render_plan(document, details=True)
-        self.assertEqual(document["candidates"], parsed["candidates"])
+        preview = cleanup.shared_preview_document(
+            plan,
+            "/tmp/fictional-codex-home",
+            codex_version="codex-cli 0.test",
+            include_titles=True,
+        )
+        parsed = json.loads(cleanup.render_plan_json(preview))
+        rendered = cleanup.render_shared_preview(preview, details=True)
+        self.assertEqual("codex-session-cleanup-plan", manifest["format"])
+        self.assertEqual("session-cleanup/preview", parsed["schema"])
+        self.assertNotIn("integrity", parsed)
+        self.assertEqual(
+            manifest["candidates"][0]["root"]["id"],
+            parsed["groups"][0]["group_id"],
+        )
         self.assertIn(session_id(1), rendered)
         self.assertIn(session_id(2), rendered)
         self.assertIn("PERMANENT DELETION IS IRREVERSIBLE", rendered)
@@ -1081,6 +1365,66 @@ class IsolatedFakeCodexIntegrationTests(unittest.TestCase):
         )
         fake_codex.chmod(0o700)
         return fake_codex
+
+    def test_cli_json_preview_matches_shared_schema_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            fake_codex = self.make_fake_codex(base)
+            fake_home = base / "codex-home"
+            fake_home.mkdir()
+            state_path = base / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "codexHome": str(fake_home),
+                        "sections": [{"id": PINNED_SECTION_ID, "name": "Pinned"}],
+                        "loaded": [],
+                        "active": [raw_thread(1)],
+                        "archived": [],
+                        "mutations": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            capabilities = cleanup.SchemaCapabilities(("cli", "vscode", "subAgent"))
+            output = io.StringIO()
+            with (
+                mock.patch.object(cleanup, "find_codex", return_value=str(fake_codex)),
+                mock.patch.object(
+                    cleanup, "inspect_installed_schema", return_value=capabilities
+                ),
+                mock.patch.object(cleanup, "inspect_mutation_commands"),
+                mock.patch.object(cleanup.os, "getcwd", return_value=PROJECT),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_HOME": str(fake_home),
+                        "FAKE_CODEX_STATE": str(state_path),
+                    },
+                    clear=False,
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = cleanup.main(["--older-than", "1d", "--json"])
+
+            self.assertEqual(0, exit_code)
+            document = json.loads(output.getvalue())
+            schema = json.loads(
+                (ROOT / "contract" / "preview-v1.schema.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            validate_json_schema(document, schema, schema)
+            self.assertEqual("session-cleanup/preview", document["schema"])
+            self.assertTrue(
+                all(
+                    session["title"] is None
+                    for group in document["groups"]
+                    for session in group["sessions"]
+                )
+            )
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertFalse(state["mutations"])
 
     def test_app_server_discovery_and_multi_root_archive(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1368,6 +1712,21 @@ class InterfaceValidationTests(unittest.TestCase):
                 cleanup.parse_args(
                     ["--older-than", "30d", "--save-plan", "plan.json", "--apply"]
                 )
+
+    def test_shared_json_is_preview_only_and_titles_are_explicit(self) -> None:
+        args = cleanup.parse_args(
+            ["--older-than", "30d", "--json", "--include-titles"]
+        )
+        self.assertTrue(args.json)
+        self.assertTrue(args.include_titles)
+        for arguments in (
+            ["--older-than", "30d", "--include-titles"],
+            ["--older-than", "30d", "--json", "--apply"],
+            ["--apply-plan", "/tmp/fictional-plan.json", "--json"],
+        ):
+            with self.subTest(arguments=arguments), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    cleanup.parse_args(arguments)
 
 
 if __name__ == "__main__":
