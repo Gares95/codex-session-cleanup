@@ -21,7 +21,9 @@ Use only the helper's narrow policy arguments:
 - Combine both selectors when requested. They use intersection semantics, so a
   conversation must be older than the cutoff and outside latest N.
 - Use `--project current` unless the user explicitly requests all projects.
-  Current means an exact match with the directory where the helper is run.
+  Current means an exact match with the directory where the helper is run. A
+  conversation enters scope when any member matches, but a related member in
+  another cwd excludes the whole conversation.
 - Use `--project all` only for wording such as “across all projects.”
 - Default ambiguous “clean” or “remove old sessions” wording to
   `--action archive`.

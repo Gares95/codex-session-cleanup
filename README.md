@@ -82,9 +82,11 @@ Discovery uses `thread/list` with `useStateDbOnly: true`. Consequently:
 - the helper does not scan rollout files or ask Codex to repair metadata;
 - archive policies consider non-archived roots and descendants only;
 - delete policies consider both active and archived roots and descendants;
-- exact-cwd root filtering happens in the app-server for `--project current`;
-- out-of-scope roots are not enumerated, while any discovered out-of-scope
-  descendant blocks its root.
+- current-project discovery enumerates state-DB-indexed ordinary roots so a
+  root outside the cwd cannot hide a related descendant inside it;
+- a conversation enters current scope when any member exactly matches the cwd,
+  then any member outside that cwd excludes the whole conversation; and
+- fully out-of-scope groups are omitted from the preview and ranking.
 
 This utility does not claim to cover every file that may exist in Codex
 history. Codex 0.165.0 still documents and exposes a normal `thread/list` mode

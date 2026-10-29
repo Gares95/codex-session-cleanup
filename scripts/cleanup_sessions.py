@@ -112,6 +112,7 @@ class Session:
 class UnsafeRecord:
     id: str | None
     reason: str
+    cwd: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -667,11 +668,7 @@ def build_plan(
         raise CleanupError("the planning clock must be timezone-aware")
 
     current_cwd = normalize_invoking_cwd(policy.current_cwd)
-    scoped_input = [
-        item
-        for item in sessions
-        if policy.project == "all" or item.cwd == current_cwd
-    ]
+    scoped_input = list(sessions)
     scoped_input.sort(key=_session_sort_key)
     scoped_by_id: dict[str, Session] = {}
     duplicate_roots: set[str] = set()
@@ -682,8 +679,7 @@ def build_plan(
             continue
         scoped_by_id[item.id] = item
     scoped = list(scoped_by_id.values())
-    malformed_items = tuple(malformed)
-    malformed_ids = {item.id for item in malformed_items if item.id is not None}
+    all_malformed_items = tuple(malformed)
 
     trees: list[Candidate] = []
     tree_issues: dict[str, list[UnsafeRecord]] = {root.id: [] for root in scoped}
@@ -724,12 +720,37 @@ def build_plan(
                     UnsafeRecord(descendant_id, "descendant appeared under multiple roots")
                 )
 
-    for item in malformed_items:
+    for item in all_malformed_items:
         if item.id is None:
             continue
         for tree in trees:
             if item.id in {member.id for member in (tree.root, *tree.descendants)}:
                 tree_issues[tree.root.id].append(item)
+
+    trees = [
+        tree
+        for tree in trees
+        if policy.project == "all"
+        or any(
+            member.cwd == current_cwd
+            for member in (tree.root, *tree.descendants)
+        )
+    ]
+    scoped = [tree.root for tree in trees]
+    represented_ids = {
+        member.id
+        for tree in trees
+        for member in (tree.root, *tree.descendants)
+    }
+    malformed_items = tuple(
+        item
+        for item in all_malformed_items
+        if policy.project == "all"
+        or item.id in represented_ids
+        or item.cwd is None
+        or item.cwd == current_cwd
+    )
+    malformed_ids = {item.id for item in malformed_items if item.id is not None}
 
     cutoff = effective_cutoff(policy, now)
     fixed_policy = dataclasses.replace(
@@ -747,7 +768,7 @@ def build_plan(
             reasons.append("metadata-malformed")
         reasons.extend(_issue_reason_code(issue) for issue in tree_issues[tree.root.id])
         if fixed_policy.project == "current" and any(
-            item.cwd != current_cwd for item in tree.descendants
+            item.cwd != current_cwd for item in (tree.root, *tree.descendants)
         ):
             reasons.append("related-outside-scope")
         if reasons:
@@ -855,11 +876,6 @@ def build_plan(
         if status in ("protected", "excluded"):
             protected_unsafe.append(UnsafeRecord(root.id, reason_text))
 
-    represented_ids = {
-        member.id
-        for tree in trees
-        for member in (tree.root, *tree.descendants)
-    }
     for item in malformed_items:
         if item.id is not None and item.id in represented_ids:
             continue
@@ -916,7 +932,9 @@ def _session_snapshot(item: Session) -> tuple[Any, ...]:
 def plan_snapshot(plan: Plan) -> tuple[Any, ...]:
     """Return all selection- and safety-critical state for stale checks."""
     observed = tuple(sorted((_session_snapshot(item) for item in plan.observed)))
-    malformed = tuple(sorted(((item.id or "", item.reason) for item in plan.malformed)))
+    malformed = tuple(
+        sorted(((item.id or "", item.reason, item.cwd or "") for item in plan.malformed))
+    )
     trees = tuple(
         (
             _session_snapshot(tree.root),
@@ -1352,10 +1370,14 @@ class SessionDiscovery:
                 "sourceKinds": list(INTERACTIVE_SOURCES),
                 "useStateDbOnly": True,
             }
-            if policy.project == "current":
-                params["cwd"] = policy.current_cwd
             for raw in self._list_pages(params):
                 raw_id = raw.get("id") if isinstance(raw.get("id"), str) else None
+                raw_cwd = raw.get("cwd")
+                unsafe_cwd = (
+                    normalize_invoking_cwd(raw_cwd)
+                    if isinstance(raw_cwd, str) and os.path.isabs(raw_cwd)
+                    else None
+                )
                 try:
                     item = parse_thread(
                         raw,
@@ -1370,14 +1392,18 @@ class SessionDiscovery:
                     existing = sessions.get(item.id)
                     if existing is not None:
                         malformed.append(
-                            UnsafeRecord(item.id, "root appeared more than once")
+                            UnsafeRecord(
+                                item.id,
+                                "root appeared more than once",
+                                item.cwd,
+                            )
                         )
                         sessions.pop(item.id, None)
                         duplicate_ids.add(item.id)
                         continue
                     sessions[item.id] = item
                 except ValueError as exc:
-                    malformed.append(UnsafeRecord(raw_id, str(exc)))
+                    malformed.append(UnsafeRecord(raw_id, str(exc), unsafe_cwd))
                     if raw_id is not None:
                         try:
                             unsafe_id = canonical_uuid(raw_id)
@@ -1411,6 +1437,12 @@ class SessionDiscovery:
             }
             for raw in self._list_pages(params):
                 raw_id = raw.get("id") if isinstance(raw.get("id"), str) else None
+                raw_cwd = raw.get("cwd")
+                unsafe_cwd = (
+                    normalize_invoking_cwd(raw_cwd)
+                    if isinstance(raw_cwd, str) and os.path.isabs(raw_cwd)
+                    else None
+                )
                 try:
                     item = parse_thread(
                         raw,
@@ -1426,7 +1458,7 @@ class SessionDiscovery:
                         raise ValueError("descendant appeared more than once")
                     descendants[item.id] = item
                 except ValueError as exc:
-                    malformed.append(UnsafeRecord(raw_id, str(exc)))
+                    malformed.append(UnsafeRecord(raw_id, str(exc), unsafe_cwd))
         return tuple(descendants.values()), tuple(malformed)
 
 
@@ -1513,8 +1545,8 @@ def policy_record(policy: Policy) -> dict[str, Any]:
         "currentCwd": policy.current_cwd,
         "action": policy.action,
         "latestRankingUniverse": (
-            "ordinary interactive roots and all discoverable spawned descendants "
-            "within the selected project scope"
+            "non-excluded root conversations within the selected project scope; "
+            "protected conversations still rank"
         ),
     }
 
@@ -1598,9 +1630,9 @@ def plan_document(
             "rootFilter": (
                 "all projects"
                 if plan.policy.project == "all"
-                else "server-side exact cwd match"
+                else "exact root-conversation member cwd match"
             ),
-            "outsideScopeRootsEnumerated": plan.policy.project == "all",
+            "outsideScopeRootsEnumerated": True,
             "descendantsOutsideScopeBlockRoot": True,
         },
         "changesMade": False,
@@ -1624,6 +1656,7 @@ def _shared_session_record(
     *,
     relation: str,
     include_titles: bool,
+    scope_path: str | None,
 ) -> dict[str, Any]:
     issue_codes = _ordered_reason_codes(
         _issue_reason_code(issue)
@@ -1633,7 +1666,8 @@ def _shared_session_record(
     if (
         group.status == "excluded"
         and "related-outside-scope" in group.reasons
-        and session.cwd != group.tree.root.cwd
+        and scope_path is not None
+        and session.cwd != scope_path
     ):
         issue_codes = _ordered_reason_codes((*issue_codes, "related-outside-scope"))
     return {
@@ -1706,6 +1740,11 @@ def shared_preview_document(
                 group,
                 relation="root",
                 include_titles=include_titles,
+                scope_path=(
+                    plan.policy.current_cwd
+                    if plan.policy.project == "current"
+                    else None
+                ),
             )
         ]
         sessions.extend(
@@ -1714,6 +1753,11 @@ def shared_preview_document(
                 group,
                 relation="descendant",
                 include_titles=include_titles,
+                scope_path=(
+                    plan.policy.current_cwd
+                    if plan.policy.project == "current"
+                    else None
+                ),
             )
             for item in group.tree.descendants
         )
@@ -2169,13 +2213,16 @@ def render_plan(
                     )
 
     scope = document.get("scope", {})
-    if isinstance(scope, Mapping) and scope.get("rootFilter") == "server-side exact cwd match":
+    if (
+        isinstance(scope, Mapping)
+        and scope.get("rootFilter") == "exact root-conversation member cwd match"
+    ):
         lines.extend(
             [
                 "",
                 "Scope exclusion:",
-                "  Root sessions outside the exact cwd were excluded by the app-server",
-                "  and were not enumerated. Out-of-project descendants block their root.",
+                "  A conversation is in scope when any member exactly matches the cwd.",
+                "  Any related member outside that cwd excludes the conversation.",
             ]
         )
 
@@ -2323,11 +2370,17 @@ def _policy_from_record(raw: Any) -> Policy:
         raise ManifestError("policy.action is invalid")
     if not isinstance(cwd, str) or not os.path.isabs(cwd):
         raise ManifestError("policy.currentCwd is not absolute")
-    expected_ranking = (
-        "ordinary interactive roots and all discoverable spawned descendants "
-        "within the selected project scope"
-    )
-    if raw.get("latestRankingUniverse") != expected_ranking:
+    accepted_rankings = {
+        (
+            "ordinary interactive roots and all discoverable spawned descendants "
+            "within the selected project scope"
+        ),
+        (
+            "non-excluded root conversations within the selected project scope; "
+            "protected conversations still rank"
+        ),
+    }
+    if raw.get("latestRankingUniverse") not in accepted_rankings:
         raise ManifestError("policy.latestRankingUniverse is unsupported")
     return Policy(
         older_than=(

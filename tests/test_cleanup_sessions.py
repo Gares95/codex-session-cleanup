@@ -488,6 +488,44 @@ class RetentionPolicyTests(unittest.TestCase):
         self.assertEqual([session_id(1)], [item.root.id for item in plan.candidates])
         self.assertEqual(1, plan.examined)
 
+    def test_current_project_excludes_group_with_related_root_outside_scope(self) -> None:
+        root = make_session(1, age_days=30, cwd="/path/to/other-project")
+        descendant = make_session(
+            2,
+            age_days=20,
+            cwd=PROJECT,
+            parent_id=root.id,
+            source_kind="subAgent",
+        )
+        plan = cleanup.build_plan(
+            [root],
+            make_policy(older_than=dt.timedelta(days=7)),
+            now=NOW,
+            descendant_lookup=lambda _: ([descendant], []),
+        )
+        self.assertFalse(plan.candidates)
+        self.assertEqual(1, len(plan.groups))
+        self.assertEqual("excluded", plan.groups[0].status)
+        self.assertIsNone(plan.groups[0].rank)
+        self.assertIn("related-outside-scope", plan.groups[0].reasons)
+
+    def test_known_out_of_scope_malformed_root_is_not_reported_in_current_scope(self) -> None:
+        plan = cleanup.build_plan(
+            [],
+            make_policy(older_than=dt.timedelta(days=7)),
+            now=NOW,
+            malformed=[
+                cleanup.UnsafeRecord(
+                    session_id(9),
+                    "fixture metadata is malformed",
+                    "/path/to/other-project",
+                )
+            ],
+        )
+        self.assertFalse(plan.groups)
+        self.assertFalse(plan.malformed)
+        self.assertFalse(plan.protections)
+
     def test_all_projects_includes_each_exact_cwd(self) -> None:
         sessions = [
             make_session(1, age_days=10),
@@ -658,6 +696,35 @@ class MetadataAndHomeTests(unittest.TestCase):
         records = discovery._list_pages({"sourceKinds": ["cli", "vscode"]})
         self.assertEqual(2, len(records))
         self.assertEqual("fictional-cursor", client.calls[1]["cursor"])
+
+    def test_current_scope_root_discovery_does_not_hide_related_groups(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def request(
+                self, method: str, params: dict[str, object]
+            ) -> dict[str, object]:
+                self.calls.append(params)
+                return {
+                    "data": [
+                        raw_thread(1, cwd="/path/to/other-project")
+                    ],
+                    "nextCursor": None,
+                }
+
+        client = FakeClient()
+        discovery = cleanup.SessionDiscovery(
+            client, cleanup.SchemaCapabilities(("cli", "vscode", "subAgent"))
+        )
+        roots, malformed = discovery.discover_roots(
+            make_policy(older_than=dt.timedelta(days=7)),
+            pinned_section_id=PINNED_SECTION_ID,
+            loaded_ids=set(),
+        )
+        self.assertEqual(1, len(roots))
+        self.assertFalse(malformed)
+        self.assertTrue(all("cwd" not in call for call in client.calls))
 
     def test_invalid_thread_pagination_cursor_fails_closed(self) -> None:
         class FakeClient:
@@ -1201,6 +1268,25 @@ class ManifestAndRenderingTests(unittest.TestCase):
         )
         self.assertEqual(plan.policy.cutoff, saved.policy.cutoff)
         self.assertEqual("codex-cli 0.test", saved.codex_version)
+
+    def test_legacy_ranking_description_remains_loadable_and_revalidated(self) -> None:
+        document = cleanup.plan_document(
+            self.make_delete_plan(),
+            "/tmp/fictional-codex-home",
+            codex_version="codex-cli 0.test",
+            state="ready",
+        )
+        document["policy"]["latestRankingUniverse"] = (
+            "ordinary interactive roots and all discoverable spawned descendants "
+            "within the selected project scope"
+        )
+        document["integrity"] = cleanup.document_integrity(document)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "legacy-plan.json"
+            cleanup.save_plan_manifest(path, document)
+            saved = cleanup.load_saved_plan(path)
+        self.assertEqual("ready", saved.document["state"])
+        self.assertEqual("delete", saved.policy.action)
 
     def test_manifest_paths_inside_codex_home_are_refused(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
