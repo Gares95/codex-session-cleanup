@@ -1,5 +1,7 @@
 # codex-session-cleanup
 
+[![tests](https://github.com/Gares95/codex-session-cleanup/actions/workflows/tests.yml/badge.svg)](https://github.com/Gares95/codex-session-cleanup/actions/workflows/tests.yml)
+
 `codex-session-cleanup` is a small Codex skill for previewing retention rules and
 safely archiving or deleting old local session history. The helper selects
 logical session UUIDs; the installed `codex` command remains responsible for
@@ -172,7 +174,8 @@ archive preview before applying it.
 Clone or copy the repository into the documented user skill location:
 
 ```bash
-git clone <repository-url> "$HOME/.agents/skills/codex-session-cleanup"
+git clone https://github.com/Gares95/codex-session-cleanup \
+  "$HOME/.agents/skills/codex-session-cleanup"
 ```
 
 The distributable skill requires only:
