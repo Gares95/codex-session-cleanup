@@ -9,18 +9,18 @@ independent backends. It defines:
    specified by [`preview-v1.schema.json`](preview-v1.schema.json);
 3. shared safety terminology ([§3](#3-terminology)).
 
-Declarative conformance cases live in [`fixtures/`](fixtures/). The current
-state of each backend is tracked in
-[`compatibility-matrix.md`](compatibility-matrix.md); the Codex migration is
-described in [`codex-handoff.md`](codex-handoff.md).
+Declarative conformance cases live in [`fixtures/`](fixtures/); conformance
+is defined in [§6](#6-conformance). Measured results for each backend are
+recorded in [`compatibility-matrix.md`](compatibility-matrix.md).
+[`codex-handoff.md`](codex-handoff.md) is the historical record of the
+completed Codex migration from draft 1; it is informative, not normative.
 
 There is no shared runtime package. Each repository vendors this directory
 (byte-identical copy, verified by `SHA256SUMS`) and tests its own
 implementation against it.
 
-Status: **draft 1** — agreed by neither release yet. Both repositories must
-pass the fixtures before either publishes a release that claims
-`schema_version: 1`.
+Status: **stable, version 1.** Both backends conform (§6); see
+[`compatibility-matrix.md`](compatibility-matrix.md). Changes follow §5.
 
 ## 1. Scope and non-goals
 
@@ -272,6 +272,8 @@ Normative definition: [`preview-v1.schema.json`](preview-v1.schema.json).
 
 ### 4.3 Capabilities
 
+Example (the Codex backend):
+
 ```json
 {
   "actions": {
@@ -346,3 +348,26 @@ Normative definition: [`preview-v1.schema.json`](preview-v1.schema.json).
   each repository's tests verify it, so an accidental edit fails the build and
   a deliberate one requires regenerating the checksums and copying the
   directory to the other repository.
+
+## 6. Conformance
+
+A backend conforms to version 1 when:
+
+1. every preview it produces validates against
+   [`preview-v1.schema.json`](preview-v1.schema.json) and follows §2–§4; and
+2. every fixture in [`fixtures/`](fixtures/) passes through its own policy
+   engine (exact status and rank, required reasons present), except fixtures
+   it may skip under the rule below.
+
+A fixture's `requires` list names capabilities from §4.3 (`pinning` refers to
+`capabilities.pinning`). A backend may skip a fixture **only** when it
+genuinely lacks a required capability **and** reports that capability as
+unsupported (`false`) in every preview it produces. A skip must be reported
+as a skip, never as a pass. A backend that reports a capability as supported
+must pass every fixture that requires it, and no fixture may be skipped for
+any other reason. Fixtures with an empty `requires` list apply to every
+backend.
+
+Unsupported capabilities never relax the semantics of supported ones: a
+backend without pinning still applies every other protection, retention, and
+exclusion rule exactly.

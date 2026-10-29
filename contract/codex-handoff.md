@@ -1,5 +1,12 @@
 # Handoff: aligning codex-session-cleanup with contract draft 1
 
+> **Status: completed.** Codex implemented this handoff on branch
+> `feat/align-shared-cleanup-contract` (commits `5635693` and `9d3552e`) and
+> conforms to contract version 1 (15/15 fixtures; see
+> [`compatibility-matrix.md`](compatibility-matrix.md)). This document is the
+> historical record of that migration and is not normative; where it differs
+> from [`SPEC.md`](SPEC.md), the specification governs.
+
 Baseline: `codex-session-cleanup` commit `f5fed73`
 (`feat/harden-retention-plans`). Read [`SPEC.md`](SPEC.md) first. The
 measured gaps are listed in

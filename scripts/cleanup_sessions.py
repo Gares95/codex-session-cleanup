@@ -1706,7 +1706,7 @@ def shared_preview_document(
     codex_version: str,
     include_titles: bool = False,
 ) -> dict[str, Any]:
-    """Render the shared draft-1 preview; never use it as mutation authority."""
+    """Render the shared stable-v1 preview; never use it as mutation authority."""
     group_counts = {
         "examined": len(plan.groups),
         "selected": 0,

@@ -29,7 +29,7 @@ test adapter; there is no shared runtime code.
 
 | Field | Meaning |
 |---|---|
-| `requires` | Capabilities the case needs (`pinning`). A backend that lacks one skips the case and reports the skip |
+| `requires` | Capabilities the case needs, named as in `capabilities` (`pinning`). A backend may skip the case only if it genuinely lacks a listed capability and reports it as `false` in its previews; the skip must be reported (SPEC §6) |
 | `evaluated_at` | The planning clock |
 | `scope.path` | The invoking directory, already canonical; POSIX form |
 | `policy.older_than_hours` | Duration in hours, or `null` |
@@ -59,6 +59,8 @@ test adapter; there is no shared runtime code.
   Claude Code's minimum-idle guard) or set them so they cannot trigger.
 - Compare: the set of group ids, then status, rank, and `reasons_include` for
   each group.
+- Derive skips from the backend's reported capabilities, not from a separate
+  hard-coded list, so a skip cannot outlive the capability gap.
 
 ## Cases
 

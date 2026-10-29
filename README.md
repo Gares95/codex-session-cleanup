@@ -107,7 +107,7 @@ Human previews include sanitized titles, last-used time and age, project path,
 archived state, root/descendant relationships, every group outcome, and shared
 reason codes. `--details` prints full UUIDs and expanded state.
 
-`--json` emits the shared `session-cleanup/preview` draft-1 structure defined
+`--json` emits the shared stable-v1 `session-cleanup/preview` structure defined
 under `contract/`. Titles are `null` by default and appear only with
 `--include-titles`. Preview JSON is an audit/reporting artifact and cannot
 authorize mutation. It is deliberately separate from the private saved-plan
@@ -264,8 +264,8 @@ python3 <skill-directory>/scripts/cleanup_sessions.py \
 ```
 
 The document has `schema: "session-cleanup/preview"` and
-`schema_version: 1`, but the shared contract is still **draft 1**, not a stable
-release claim. It reports selected, retained, protected, and excluded groups,
+`schema_version: 1` from the stable shared contract. It reports selected,
+retained, protected, and excluded groups,
 their ranks and reason codes, all root/descendant members, Codex capabilities,
 and Codex-specific metadata under `extensions.codex`.
 
