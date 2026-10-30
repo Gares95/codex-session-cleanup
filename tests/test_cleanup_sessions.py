@@ -27,7 +27,25 @@ sys.modules[SPEC.name] = cleanup
 SPEC.loader.exec_module(cleanup)
 
 NOW = dt.datetime(2026, 8, 8, 12, 0, tzinfo=dt.timezone.utc)
-PROJECT = "/home/user/project"
+
+
+def fictional_path(label: str) -> str:
+    """Return a normalized, host-native absolute path for synthetic data."""
+    value = Path(tempfile.gettempdir()) / "codex-session-cleanup-tests" / label
+    return cleanup.normalize_invoking_cwd(str(value))
+
+
+def fixture_project_path(value: object) -> str:
+    digest = hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
+    return fictional_path(f"fixture-project-{digest}")
+
+
+PROJECT = fictional_path("project")
+PROJECT_CHILD = cleanup.normalize_invoking_cwd(os.path.join(PROJECT, "child"))
+PROJECT_SIBLING = fictional_path("project-sibling")
+OTHER_PROJECT = fictional_path("other-project")
+CODEX_HOME = fictional_path("codex-home")
+DIFFERENT_CODEX_HOME = fictional_path("different-codex-home")
 PINNED_SECTION_ID = "00000000-0000-4000-8000-000000000900"
 
 
@@ -147,7 +165,7 @@ def valid_schema_documents() -> tuple[dict[str, object], ...]:
 def plan_document(plan: cleanup.Plan) -> dict[str, object]:
     return cleanup.plan_document(
         plan,
-        "/tmp/fictional-codex-home",
+        CODEX_HOME,
         codex_version="codex-cli 0.test",
     )
 
@@ -284,7 +302,7 @@ class ContractConformanceTests(unittest.TestCase):
                 created_at=recency - dt.timedelta(hours=1),
                 updated_at=recency,
                 recency_at=recency,
-                cwd=str(raw["project"]),
+                cwd=fixture_project_path(raw["project"]),
                 pinned=state == "pinned",
                 ephemeral=state == "ephemeral",
                 status="active" if state == "running" else "idle",
@@ -341,7 +359,7 @@ class ContractConformanceTests(unittest.TestCase):
             policy_data["keep_latest"],
             str(scope["mode"]),
             "archive",
-            str(scope["path"] or "/work/repo"),
+            fixture_project_path(scope["path"] or "/work/repo"),
         )
         roots = [item for item in sessions.values() if item.parent_id is None]
         return (
@@ -400,7 +418,7 @@ class ContractConformanceTests(unittest.TestCase):
         )
         without_titles = cleanup.shared_preview_document(
             plan,
-            "/tmp/fictional-codex-home",
+            CODEX_HOME,
             codex_version="codex-cli 0.test",
         )
         validate_json_schema(without_titles, schema, schema)
@@ -413,7 +431,7 @@ class ContractConformanceTests(unittest.TestCase):
         )
         with_titles = cleanup.shared_preview_document(
             plan,
-            "/tmp/fictional-codex-home",
+            CODEX_HOME,
             codex_version="codex-cli 0.test",
             include_titles=True,
         )
@@ -434,7 +452,7 @@ class ContractConformanceTests(unittest.TestCase):
             cleanup.render_plan_json(
                 cleanup.shared_preview_document(
                     plan,
-                    "/tmp/fictional-codex-home",
+                    CODEX_HOME,
                     codex_version="codex-cli 0.test",
                 )
             ),
@@ -479,8 +497,8 @@ class RetentionPolicyTests(unittest.TestCase):
     def test_current_project_requires_exact_cwd(self) -> None:
         sessions = [
             make_session(1, age_days=10),
-            make_session(2, age_days=10, cwd=PROJECT + "/child"),
-            make_session(3, age_days=10, cwd="/home/user/project-sibling"),
+            make_session(2, age_days=10, cwd=PROJECT_CHILD),
+            make_session(3, age_days=10, cwd=PROJECT_SIBLING),
         ]
         plan = cleanup.build_plan(
             sessions, make_policy(older_than=dt.timedelta(days=7)), now=NOW
@@ -489,7 +507,7 @@ class RetentionPolicyTests(unittest.TestCase):
         self.assertEqual(1, plan.examined)
 
     def test_current_project_excludes_group_with_related_root_outside_scope(self) -> None:
-        root = make_session(1, age_days=30, cwd="/path/to/other-project")
+        root = make_session(1, age_days=30, cwd=OTHER_PROJECT)
         descendant = make_session(
             2,
             age_days=20,
@@ -518,7 +536,7 @@ class RetentionPolicyTests(unittest.TestCase):
                 cleanup.UnsafeRecord(
                     session_id(9),
                     "fixture metadata is malformed",
-                    "/path/to/other-project",
+                    OTHER_PROJECT,
                 )
             ],
         )
@@ -529,7 +547,7 @@ class RetentionPolicyTests(unittest.TestCase):
     def test_all_projects_includes_each_exact_cwd(self) -> None:
         sessions = [
             make_session(1, age_days=10),
-            make_session(2, age_days=10, cwd="/path/to/other-project"),
+            make_session(2, age_days=10, cwd=OTHER_PROJECT),
         ]
         plan = cleanup.build_plan(
             sessions,
@@ -588,14 +606,14 @@ class MetadataAndHomeTests(unittest.TestCase):
             cleanup.validate_schema_contract(*schemas)
 
     def test_alternate_codex_home_is_taken_from_initialize(self) -> None:
-        alternate = "/tmp/fictional-codex-home"
+        alternate = CODEX_HOME
         resolved = cleanup.validate_codex_home(
             {"codexHome": alternate}, {"CODEX_HOME": alternate}
         )
-        self.assertEqual(alternate, resolved)
+        self.assertEqual(cleanup.normalize_invoking_cwd(alternate), resolved)
         with self.assertRaises(cleanup.ProtocolError):
             cleanup.validate_codex_home(
-                {"codexHome": alternate}, {"CODEX_HOME": "/tmp/different-home"}
+                {"codexHome": alternate}, {"CODEX_HOME": DIFFERENT_CODEX_HOME}
             )
 
     def test_malformed_or_missing_metadata_fails_safely(self) -> None:
@@ -708,7 +726,7 @@ class MetadataAndHomeTests(unittest.TestCase):
                 self.calls.append(params)
                 return {
                     "data": [
-                        raw_thread(1, cwd="/path/to/other-project")
+                        raw_thread(1, cwd=OTHER_PROJECT)
                     ],
                     "nextCursor": None,
                 }
@@ -1115,7 +1133,7 @@ class DescendantSafetyTests(unittest.TestCase):
     def test_outside_project_descendant_blocks_root(self) -> None:
         root = make_session(1, age_days=30)
         descendant = make_session(
-            2, age_days=20, cwd="/path/to/other-project", parent_id=root.id
+            2, age_days=20, cwd=OTHER_PROJECT, parent_id=root.id
         )
         plan = cleanup.build_plan(
             [root],
@@ -1230,9 +1248,9 @@ class ApplySafetyTests(unittest.TestCase):
         self.assertIn("changed", report.stopped_reason)
 
     def test_cleanup_lock_rejects_overlapping_invocations(self) -> None:
-        with cleanup.CleanupLock("/tmp/fictional-codex-home"):
+        with cleanup.CleanupLock(CODEX_HOME):
             with self.assertRaises(cleanup.LockError):
-                with cleanup.CleanupLock("/tmp/fictional-codex-home"):
+                with cleanup.CleanupLock(CODEX_HOME):
                     self.fail("second lock unexpectedly succeeded")
 
 
@@ -1251,7 +1269,7 @@ class ManifestAndRenderingTests(unittest.TestCase):
         plan = self.make_delete_plan()
         document = cleanup.plan_document(
             plan,
-            "/tmp/fictional-codex-home",
+            CODEX_HOME,
             codex_version="codex-cli 0.test",
             state="ready",
             plan_id=session_id(700),
@@ -1259,7 +1277,8 @@ class ManifestAndRenderingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "cleanup-plan.json"
             cleanup.save_plan_manifest(path, document)
-            self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
+            if os.name != "nt":
+                self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
             saved = cleanup.load_saved_plan(path)
         self.assertEqual(session_id(700), saved.document["planId"])
         self.assertEqual(
@@ -1272,7 +1291,7 @@ class ManifestAndRenderingTests(unittest.TestCase):
     def test_legacy_ranking_description_remains_loadable_and_revalidated(self) -> None:
         document = cleanup.plan_document(
             self.make_delete_plan(),
-            "/tmp/fictional-codex-home",
+            CODEX_HOME,
             codex_version="codex-cli 0.test",
             state="ready",
         )
@@ -1303,7 +1322,7 @@ class ManifestAndRenderingTests(unittest.TestCase):
     def test_manifest_with_extra_or_modified_fields_is_rejected(self) -> None:
         document = cleanup.plan_document(
             self.make_delete_plan(),
-            "/tmp/fictional-codex-home",
+            CODEX_HOME,
             codex_version="codex-cli 0.test",
             state="ready",
         )
@@ -1318,7 +1337,7 @@ class ManifestAndRenderingTests(unittest.TestCase):
     def test_manifest_rejects_inconsistent_cutoff_even_with_updated_digest(self) -> None:
         document = cleanup.plan_document(
             self.make_delete_plan(),
-            "/tmp/fictional-codex-home",
+            CODEX_HOME,
             codex_version="codex-cli 0.test",
             state="ready",
         )
@@ -1335,7 +1354,7 @@ class ManifestAndRenderingTests(unittest.TestCase):
     def test_manifest_with_public_permissions_is_rejected(self) -> None:
         document = cleanup.plan_document(
             self.make_delete_plan(),
-            "/tmp/fictional-codex-home",
+            CODEX_HOME,
             codex_version="codex-cli 0.test",
             state="ready",
         )
@@ -1349,7 +1368,7 @@ class ManifestAndRenderingTests(unittest.TestCase):
     def test_consumed_or_partially_consumed_manifest_cannot_replay(self) -> None:
         document = cleanup.plan_document(
             self.make_delete_plan(),
-            "/tmp/fictional-codex-home",
+            CODEX_HOME,
             codex_version="codex-cli 0.test",
             state="ready",
         )
@@ -1393,13 +1412,13 @@ class ManifestAndRenderingTests(unittest.TestCase):
         plan = self.make_delete_plan()
         manifest = cleanup.plan_document(
             plan,
-            "/tmp/fictional-codex-home",
+            CODEX_HOME,
             codex_version="codex-cli 0.test",
             state="ready",
         )
         preview = cleanup.shared_preview_document(
             plan,
-            "/tmp/fictional-codex-home",
+            CODEX_HOME,
             codex_version="codex-cli 0.test",
             include_titles=True,
         )
@@ -1442,6 +1461,7 @@ class ManifestAndRenderingTests(unittest.TestCase):
         )
 
 
+@unittest.skipIf(os.name == "nt", "fake Codex launcher is POSIX-only")
 class IsolatedFakeCodexIntegrationTests(unittest.TestCase):
     def make_fake_codex(self, base: Path) -> Path:
         fake_codex = base / "codex"
