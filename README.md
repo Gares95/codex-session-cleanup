@@ -1,6 +1,9 @@
 # codex-session-cleanup
 
-[![tests](https://github.com/Gares95/codex-session-cleanup/actions/workflows/tests.yml/badge.svg)](https://github.com/Gares95/codex-session-cleanup/actions/workflows/tests.yml)
+[![CI](https://github.com/Gares95/codex-session-cleanup/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Gares95/codex-session-cleanup/actions/workflows/tests.yml)
+[![Latest release](https://img.shields.io/github/v/release/Gares95/codex-session-cleanup?display_name=tag)](https://github.com/Gares95/codex-session-cleanup/releases/latest)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 `codex-session-cleanup` is a small Codex skill for previewing retention rules and
 safely archiving or deleting old local session history. The helper selects
@@ -10,8 +13,91 @@ rollout files, metadata, and descendant cascades.
 The helper never edits Codex files, databases, indexes, or other internal state
 directly. Python 3.10+ and the standard library are sufficient.
 
+Using Claude Code instead? See
+[`claude-session-cleanup`](https://github.com/Gares95/claude-session-cleanup).
+The projects share retention semantics through the same cleanup contract, but
+their mutation capabilities differ.
+
+## Capabilities
+
+| Capability | Support |
+| --- | --- |
+| Preview retention rules | Yes — read-only by default |
+| Archive sessions | Yes — Codex-native and reversible |
+| Permanent delete | Yes — irreversible; reviewed saved plan required |
+| Filter by age | Yes |
+| Keep latest N conversations | Yes — root thread plus descendants |
+| Current-project filtering | Yes — exact normalized cwd |
+
+## Installation
+
+Clone or copy the repository into the documented user skill location:
+
+```bash
+git clone https://github.com/Gares95/codex-session-cleanup \
+  "$HOME/.agents/skills/codex-session-cleanup"
+```
+
+The distributable skill requires only:
+
+```text
+SKILL.md
+scripts/cleanup_sessions.py
+```
+
+Run the helper while remaining in the project whose sessions you want to
+target. Running it from the skill directory would make that directory the
+exact current-project scope.
+
+## Quick start
+
+Natural-language requests the skill understands include:
+
+- “Preview Codex sessions older than 30 days.”
+- “Keep my latest 5 conversations.”
+- “Archive old sessions for this project.”
+- “Delete sessions older than 30 days.”
+
+For direct CLI use, set the installed location and run commands from the
+project whose sessions you want to target:
+
+```bash
+CLEANUP_SKILL="$HOME/.agents/skills/codex-session-cleanup"
+```
+
+Preview current-project sessions older than 30 days without making changes:
+
+```bash
+python3 "$CLEANUP_SKILL/scripts/cleanup_sessions.py" \
+  --older-than 30d --project current --action archive
+```
+
+After reviewing that preview, archive the same policy with Codex's reversible
+native operation:
+
+```bash
+python3 "$CLEANUP_SKILL/scripts/cleanup_sessions.py" \
+  --older-than 30d --project current --action archive --apply
+```
+
+Permanent deletion is irreversible and cannot use ordinary `--apply`. Save a
+private plan, review it, and apply that exact plan:
+
+```bash
+mkdir -p .local
+python3 "$CLEANUP_SKILL/scripts/cleanup_sessions.py" \
+  --older-than 30d --project current --action delete \
+  --details --save-plan .local/cleanup-plan.json
+
+# Review the private manifest before continuing.
+python3 -m json.tool .local/cleanup-plan.json
+
+python3 "$CLEANUP_SKILL/scripts/cleanup_sessions.py" \
+  --apply-plan .local/cleanup-plan.json
+```
+
 > [!IMPORTANT]
-> **Compatibility status (last verified 2026-10-29):** Codex CLI 0.165.0
+> **Compatibility status (last verified 2026-10-31):** Codex CLI 0.165.0
 > exposes pinning through `Thread.section` and paginated
 > `threadSection/list`. The helper discovers the unique built-in `Pinned`
 > section and validates the installed generated schema on every invocation.
@@ -169,87 +255,35 @@ still performs locking and per-root validation, but it is not persistently
 bound to a preview from an earlier command. The skill should show a separate
 archive preview before applying it.
 
-## Installation
-
-Clone or copy the repository into the documented user skill location:
-
-```bash
-git clone https://github.com/Gares95/codex-session-cleanup \
-  "$HOME/.agents/skills/codex-session-cleanup"
-```
-
-The distributable skill requires only:
-
-```text
-SKILL.md
-scripts/cleanup_sessions.py
-```
-
-Run the helper by absolute path while remaining in the project whose sessions
-you want to target. Running it from the skill directory would make that
-directory the exact current-project scope.
-
-## Examples
+## More examples
 
 Replace `<skill-directory>` with the installed skill directory.
 
-### 1. Current-project archive preview
+No policy flags are accepted with `--apply-plan`; the reviewed manifest shown
+in the quick start is the policy and candidate authority.
 
-```bash
-python3 <skill-directory>/scripts/cleanup_sessions.py \
-  --older-than 7d --project current --action archive
-```
-
-### 2. Current-project permanent-delete preview
-
-```bash
-python3 <skill-directory>/scripts/cleanup_sessions.py \
-  --older-than 30d --project current --action delete
-```
-
-This never deletes anything and explains that a saved plan is required.
-
-### 3. Save a deletion manifest
-
-```bash
-mkdir -p .local
-python3 <skill-directory>/scripts/cleanup_sessions.py \
-  --older-than 30d --project current --action delete \
-  --details --save-plan .local/cleanup-plan.json
-```
-
-### 4. Apply the reviewed manifest
-
-```bash
-python3 <skill-directory>/scripts/cleanup_sessions.py \
-  --apply-plan .local/cleanup-plan.json
-```
-
-No policy flags are accepted with `--apply-plan`; the reviewed manifest is the
-policy and candidate authority.
-
-### 5. Keep the most recent N conversations
+### Keep the most recent N conversations
 
 ```bash
 python3 <skill-directory>/scripts/cleanup_sessions.py \
   --keep-latest 5 --project current
 ```
 
-### 6. Combine age and latest-count retention
+### Combine age and latest-count retention
 
 ```bash
 python3 <skill-directory>/scripts/cleanup_sessions.py \
   --older-than 7d --keep-latest 5 --project current
 ```
 
-### 7. Consider all projects
+### Consider all projects
 
 ```bash
 python3 <skill-directory>/scripts/cleanup_sessions.py \
   --older-than 30d --project all --action archive
 ```
 
-### 8. Review full UUIDs and all affected descendants
+### Review full UUIDs and all affected descendants
 
 ```bash
 python3 <skill-directory>/scripts/cleanup_sessions.py \
@@ -259,7 +293,7 @@ python3 <skill-directory>/scripts/cleanup_sessions.py \
 Compact previews also list every affected descendant; `--details` expands IDs
 and runtime metadata.
 
-### 9. Obtain machine-readable JSON
+### Obtain machine-readable JSON
 
 ```bash
 python3 <skill-directory>/scripts/cleanup_sessions.py \
@@ -285,13 +319,6 @@ Preview JSON contains identifiers and local project paths even without titles,
 so treat it as private. It contains no conversation messages, tool output, or
 file content. The private mutation manifest remains a different backend-specific
 document created only with `--save-plan`.
-
-### Archive after review
-
-```bash
-python3 <skill-directory>/scripts/cleanup_sessions.py \
-  --older-than 7d --project current --action archive --apply
-```
 
 ### Read-only compatibility check
 
