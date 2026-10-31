@@ -169,7 +169,7 @@ reported separately (Claude extension `native_retention`), never mixed into
 | **Archive** | Codex's native operation (`codex archive`). Moves sessions out of the active list; Codex can unarchive them | The agent (`codex unarchive`) | The agent |
 | **Quarantine** | A tool-managed operation that moves session data out of the agent's storage into a store owned by the tool. The agent has no knowledge of it | Only this tool's **restore**, under the tool's own integrity guarantees | The tool |
 | **Restore** | Undo a quarantine: verify integrity and copy data back without overwriting anything | — | The tool |
-| **Permanent delete** | Irreversible removal. Requires an approved saved plan | Nothing | The agent (Codex) or not offered (Claude Code) |
+| **Permanent delete** | Irreversible removal. Requires an approved saved plan | Nothing | Codex: the agent (`codex delete`), driven by the tool. Claude Code: the tool itself, removing the session's own files, because Claude Code has no native single-session delete; available only where the tool meets its safety requirements |
 
 Archive and quarantine are **never interchangeable**. A backend that lacks an
 operation reports it as unsupported; it never maps a request for one onto the
@@ -294,6 +294,15 @@ Example (the Codex backend):
   state), `partial` (heuristic signals; coverage gaps documented), or `none`.
 - `unsupported_reason` codes: `not-offered-by-backend`,
   `read-only-release`, `blocked-by-safety-requirements`, or a backend code.
+- Capabilities describe the tool where the preview was produced. They may
+  differ by agent, platform, and runtime conditions; consumers read them
+  from each preview and never assume them per agent. For example, the
+  Claude Code backend currently reports `delete` as `supported: true` with
+  `requires_saved_plan: true` where its safety requirements are met (Linux),
+  and as `supported: false` with `blocked-by-safety-requirements` elsewhere;
+  it reports `archive` and `quarantine` as unsupported
+  (`not-offered-by-backend`). Measured values are in
+  [`compatibility-matrix.md`](compatibility-matrix.md).
 
 ### 4.4 Group
 

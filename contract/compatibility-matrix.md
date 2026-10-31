@@ -1,10 +1,11 @@
 # Compatibility matrix
 
-Contract version 1 (stable) against each backend, measured 2026-10-29.
+Contract version 1 (stable) against each backend. Codex measured
+2026-10-29; Claude Code re-measured 2026-10-31 after adding permanent delete.
 
 | Backend | Revision measured | Agent version |
 |---|---|---|
-| Claude Code (`claude-session-cleanup`) | `main`: implementation at `d615842`, plus the v1 conformance-test update (skips derived from reported capabilities) | storage layout of Claude Code 2.1.310 |
+| Claude Code (`claude-session-cleanup`) | `feat/safe-session-delete` at `fe91fdc` (permanent delete added to the v1.0.0 release) | storage layout of Claude Code 2.1.310, 2.1.314, and 2.1.316; deletion validated with 2.1.316 |
 | Codex (`codex-session-cleanup`) | `feat/align-shared-cleanup-contract` at `9d3552e` | Codex CLI 0.164.0 |
 
 Legend: ✅ pass · ⏭️ skipped because a required capability is unsupported
@@ -27,7 +28,8 @@ How each result was measured:
   the real grouping and policy code and checks status, rank, and
   `reasons_include`; `tests/test_cli.py` validates generated previews against
   the schema; the contract integrity test recomputes `SHA256SUMS`. Full suite:
-  115 tests, 1 skip (the pinning fixture).
+  157 tests, 1 skip (the pinning fixture) on Linux and macOS; CI runs it on
+  Linux, macOS, and Windows with Python 3.10 to 3.13.
 - **Codex:** `ContractConformanceTests` asserts that all 15 fixtures are
   present and checks status, rank, and `reasons_include` for each, with no
   skip path; an isolated fake-Codex run validates `--json` against the
@@ -43,6 +45,30 @@ preview and its conformance test derives the skip from that reported value.
 This is a capability gap, not a semantic deviation: every other protection,
 retention, and exclusion rule applies unchanged. If Claude Code gains pinning
 and the backend starts reporting `pinning: true`, the fixture must then pass.
+
+## Claude Code permanent delete
+
+The fixtures test selection semantics, not mutation, and are unaffected by
+the actions a backend offers. Measured 2026-10-31:
+
+- **Implemented by the tool, not by Claude Code.** No narrow native
+  single-session delete was found in Claude Code 2.1.316: `claude rm`
+  removes background-session records only, and `claude purge` removes a
+  whole project's state (auto memory, task lists, file history,
+  prompt-history lines, configuration entry), so it is not used. The tool
+  removes only the files it attributes to each selected session.
+- **Reviewed saved plan only.** `--action delete --save-plan PATH`, review,
+  then `--apply-plan PATH`; `--apply` is refused. Applying re-evaluates the
+  saved policy with its absolute cutoff and refuses with nothing deleted
+  on any difference.
+- **Platform-dependent.** Linux: `delete` `supported: true`,
+  `requires_saved_plan: true`, validated by the tool's own destructive test
+  suite and end to end on a real configuration directory. macOS and
+  Windows: `supported: false`, `blocked-by-safety-requirements`, because the
+  active-session checks deletion needs are not available there.
+- **Unchanged:** `archive` and `quarantine` unsupported; pinning
+  unsupported; fixture results 14 pass, 1 capability skip, 0 semantic
+  failures.
 
 ## Conformance fixtures
 
@@ -79,7 +105,7 @@ and the backend starts reporting `pinning: true`, the fixture must then pass.
 | Four statuses and precedence | ✅ | ✅ |
 | Reason-code registry (§3.3) | ✅ | ✅ |
 | Preview JSON v1, titles opt-in (`--include-titles`) | ✅ | ✅ |
-| Preview kept separate from saved-plan manifests | ➖ no manifests (read-only) | ✅ manifests unchanged |
+| Preview kept separate from saved-plan manifests | ✅ separate private plan format (`claude-session-cleanup-plan`) | ✅ manifests unchanged |
 
 ## Backend differences that remain by design
 
@@ -91,11 +117,11 @@ These are reported through `capabilities`, `activity_timestamp`, and
 | Activity source | `derived`: max of transcript mtime, artifact mtimes, message timestamps; conservative | `agent-reported`: `recencyAt`, 1 s resolution |
 | Discovery coverage | Every transcript file under `projects/` | Sessions indexed in the Codex state DB; unindexed rollouts are not seen |
 | Pinning | Unsupported (`pinning: false`) | Built-in `Pinned` section |
-| Active-session detection | `partial`: registry + PID start time (Linux), background records, invoking session, minimum-idle guard | `agent-reported`: runtime status and loaded-thread list (a standalone app-server cannot see other servers' loads) |
+| Active-session detection | `partial`: registry + PID start time and `pidDomain` (Linux), Linux scan of Claude Code processes, background records, invoking session, minimum-idle guard | `agent-reported`: runtime status and loaded-thread list (a standalone app-server cannot see other servers' loads) |
 | Sizes | Measured, per artifact kind | Not available (`null`) |
-| Archive | Unsupported (Claude Code has none) | Native, reversible by Codex |
-| Quarantine | Unsupported (`read-only-release`) | Unsupported (`not-offered-by-backend`) |
-| Permanent delete | Unsupported | Supported through a reviewed saved plan only |
+| Archive | Unsupported (`not-offered-by-backend`; Claude Code has none) | Native, reversible by Codex |
+| Quarantine | Unsupported (`not-offered-by-backend`) | Unsupported (`not-offered-by-backend`) |
+| Permanent delete | Linux: supported through a reviewed saved plan only, performed by the tool. macOS, Windows: unsupported (`blocked-by-safety-requirements`) | Supported through a reviewed saved plan only, performed by Codex |
 | Archived sessions | ➖ | Archive policies see non-archived sessions; delete policies see both |
 | Backend-only protections | `invoking-session`, `possibly-running`, `background-session`, `recently-active` | `pinned`, `ephemeral`, `unsafe-runtime-state` |
 | Native retention | Claude Code's `cleanupPeriodDays` sweep reported in `extensions.claude_code` | None known |
@@ -111,4 +137,8 @@ These are reported through `capabilities`, `activity_timestamp`, and
 - **Version 1 (2026-10-29).** Promoted to stable after both backends reached
   conformance. The only change from draft 1 is clarifying wording (status,
   §6 Conformance, capability-dependent skips); no rule, field, schema, or
-  fixture changed.
+  fixture changed. Claude Code was read-only at the time: every action
+  unsupported, quarantine reported as `read-only-release`.
+- **Version 1, capability update (2026-10-31).** Claude Code gained
+  tool-performed permanent delete on Linux. Wording only (SPEC §3.1 and
+  §4.3, this matrix); no rule, field, schema, or fixture changed.
