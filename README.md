@@ -356,6 +356,18 @@ The suite verifies the vendored contract checksums, all 15 shared conformance
 fixtures, shared preview schema shape, saved-plan replay/staleness rules, and
 isolated fake-Codex mutation behavior.
 
+An Agensi marketplace distribution can be built without changing the
+canonical helper:
+
+```bash
+python3 tools/build_agensi.py
+python3 tools/test_agensi_bundle.py
+```
+
+The deterministic ZIP is written under ignored `dist/agensi/`. See
+[`docs/agensi-packaging.md`](docs/agensi-packaging.md) for its exact contents,
+isolation model, and security review.
+
 Validate skill frontmatter with the `quick_validate.py` helper bundled with
 Codex's `skill-creator` skill. Tests use fictional UUIDs and temporary state;
 they never destructively test personal Codex sessions.
