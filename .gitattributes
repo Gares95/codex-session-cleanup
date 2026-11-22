@@ -1,1 +1,4 @@
 contract/** -text
+/LICENSE text eol=lf
+/scripts/cleanup_sessions.py text eol=lf
+/packaging/agensi/** text eol=lf
