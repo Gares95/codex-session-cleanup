@@ -40,6 +40,9 @@ def descendants(state: dict[str, Any], root_id: str) -> set[str]:
 
 def mutate(action: str, session_id: str) -> int:
     state = load_state()
+    if session_id in state.get("failMutationIds", []):
+        print(f"fake Codex refused {action} for {session_id}", file=sys.stderr)
+        return 1
     affected = descendants(state, session_id)
     if action == "archive":
         moved = [item for item in state.get("active", []) if item["id"] in affected]
@@ -83,7 +86,80 @@ def list_threads(state: dict[str, Any], params: dict[str, Any]) -> list[dict[str
     source_kinds = params.get("sourceKinds")
     if source_kinds:
         records = [item for item in records if item.get("source") in source_kinds]
-    return sorted(records, key=lambda item: (-item["recencyAt"], item["id"]))
+    section_id = params.get("sectionId")
+    if section_id:
+        records = [item for item in records if item.get("section") == section_id]
+
+    def order(item: dict[str, Any]) -> tuple[int, str]:
+        recency = item.get("recencyAt")
+        return (-(recency if isinstance(recency, int) else -1), str(item.get("id", "")))
+
+    return sorted(records, key=order)
+
+
+def schema_documents() -> list[dict[str, Any]]:
+    thread_fields = {
+        name: {}
+        for name in (
+            "id", "name", "preview", "createdAt", "updatedAt", "recencyAt",
+            "cwd", "ephemeral", "section", "sessionId", "parentThreadId",
+            "source", "status",
+        )
+    }
+    documents: list[dict[str, Any]] = [
+        {
+            "title": "ThreadListParams",
+            "properties": {
+                name: {}
+                for name in (
+                    "ancestorThreadId", "archived", "cursor", "cwd", "limit",
+                    "sectionId", "sortKey", "sortDirection", "sourceKinds",
+                    "useStateDbOnly",
+                )
+            },
+            "definitions": {
+                "ThreadSourceKind": {"enum": ["cli", "vscode", "subAgent"]}
+            },
+        },
+        {
+            "title": "ThreadListResponse",
+            "properties": {"data": {}, "nextCursor": {}},
+            "definitions": {"Thread": {"properties": thread_fields}},
+        },
+        {"title": "InitializeResponse", "properties": {"codexHome": {}}},
+        {
+            "title": "ThreadSectionListParams",
+            "properties": {"cursor": {}, "limit": {}},
+        },
+        {
+            "title": "ThreadSectionListResponse",
+            "properties": {"data": {}, "nextCursor": {}},
+            "definitions": {
+                "ThreadSection": {"properties": {"id": {}, "name": {}}}
+            },
+        },
+        {
+            "title": "ThreadLoadedListParams",
+            "properties": {"cursor": {}, "limit": {}},
+        },
+        {
+            "title": "ThreadLoadedListResponse",
+            "properties": {"data": {}, "nextCursor": {}},
+        },
+    ]
+    if os.environ.get("FAKE_CODEX_SCHEMA_MODE") == "missing-recency":
+        del documents[1]["definitions"]["Thread"]["properties"]["recencyAt"]
+    return documents
+
+
+def write_schema(output_dir: str) -> int:
+    root = Path(output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    for index, document in enumerate(schema_documents()):
+        (root / f"schema-{index}.json").write_text(
+            json.dumps(document), encoding="utf-8"
+        )
+    return 0
 
 
 def serve() -> int:
@@ -121,8 +197,21 @@ def serve() -> int:
 def main() -> int:
     arguments = sys.argv[1:]
     if arguments == ["--version"]:
-        print("codex-cli 0.fake")
+        print(os.environ.get("FAKE_CODEX_VERSION", "codex-cli 0.fake"))
         return 0
+    if arguments == ["archive", "--help"]:
+        print("Usage: codex archive <SESSION>")
+        return 0
+    if arguments == ["delete", "--help"]:
+        suffix = " --force" if os.environ.get("FAKE_CODEX_HELP_MODE") != "missing-force" else ""
+        print(f"Usage: codex delete <SESSION>{suffix}")
+        return 0
+    if (
+        len(arguments) == 5
+        and arguments[:3] == ["app-server", "generate-json-schema", "--experimental"]
+        and arguments[3] == "--out"
+    ):
+        return write_schema(arguments[4])
     if len(arguments) >= 2 and arguments[0] in ("archive", "delete"):
         return mutate(arguments[0], arguments[1])
     if arguments[:2] == ["app-server", "--stdio"]:

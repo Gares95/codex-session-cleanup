@@ -19,7 +19,9 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "scripts" / "cleanup_sessions.py"
+MODULE_PATH = Path(
+    os.environ.get("CODEX_SESSION_CLEANUP_SCRIPT", ROOT / "scripts" / "cleanup_sessions.py")
+)
 SPEC = importlib.util.spec_from_file_location("cleanup_sessions", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 cleanup = importlib.util.module_from_spec(SPEC)

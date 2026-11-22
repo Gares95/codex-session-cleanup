@@ -24,3 +24,11 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python -m unittest discover -s tests -v
+      - name: Build the deterministic Agensi package
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python tools/build_agensi.py
+      - name: Run the canonical suite against the packaged script
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python tools/test_agensi_bundle.py
